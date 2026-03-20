@@ -2758,21 +2758,16 @@ function createPeerConnection(remoteSid,polite){
   if(localStream) localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
   pc.onicecandidate=e=>{ if(e.candidate&&socket) socket.emit('voice:ice',{to:remoteSid,candidate:e.candidate}); };
   const audioEl=document.createElement('audio');
-  audioEl.autoplay=true; audioEl.muted=true; audioEl.style.display='none';
+  audioEl.autoplay=true;
+  audioEl.style.display='none';
   document.body.appendChild(audioEl);
   pc.ontrack=e=>{
     console.log('[VOICE] Got remote track from',remoteSid,'kind:',e.track.kind,'streams:',e.streams.length);
     const stream=e.streams[0]||new MediaStream([e.track]);
     audioEl.srcObject=stream;
-    audioEl.muted=false;
+    audioEl.volume=1;
     audioEl.play().catch(err=>console.warn('[VOICE] play() blocked:',err));
-    try{
-      const ctx=getAudioCtx();
-      const gainNode=ctx.createGain(); gainNode.gain.value=1; gainNode.connect(ctx.destination);
-      ctx.createMediaStreamSource(stream).connect(gainNode);
-      if(peerConnections[remoteSid]) peerConnections[remoteSid].gainNode=gainNode;
-    }catch(err){ console.warn('[VOICE] AudioCtx err',err); }
-    showNotification('Voice active! 🎙️');
+    showNotification('🎙️ Voice connected!');
   };
   pc.onconnectionstatechange=()=>{ console.log('[VOICE] state:',pc.connectionState,'with',remoteSid); if(pc.connectionState==='failed'||pc.connectionState==='closed') closePeer(remoteSid); };
   pc.oniceconnectionstatechange=()=>console.log('[VOICE] ICE:',pc.iceConnectionState,'with',remoteSid);
@@ -2789,12 +2784,12 @@ function updateVoiceVolumes(){
   if(!micActive) return;
   Object.entries(otherPlayers).forEach(([sid,p])=>{
     const peer=peerConnections[sid];
-    if(!peer||!peer.gainNode||!peer.audioCtx) return; // not ready yet
+    if(!peer||!peer.audioEl) return;
     const dx=camera.position.x-p.group.position.x;
     const dz=camera.position.z-p.group.position.z;
     const dist=Math.sqrt(dx*dx+dz*dz);
     const vol=dist>VOICE_RANGE?0:dist<VOICE_FALLOFF?1:1-(dist-VOICE_FALLOFF)/(VOICE_RANGE-VOICE_FALLOFF);
-    try{ peer.gainNode.gain.setTargetAtTime(vol,peer.audioCtx.currentTime,0.1); }catch(e){}
+    peer.audioEl.volume=Math.max(0,Math.min(1,vol));
   });
 }
 
