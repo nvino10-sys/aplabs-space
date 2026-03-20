@@ -4242,6 +4242,7 @@ playerMenu.style.cssText=`position:fixed;background:rgba(0,10,30,0.92);color:whi
   font-family:sans-serif;border:1px solid rgba(255,255,255,0.2);border-radius:14px;
   padding:8px;display:none;z-index:350;backdrop-filter:blur(10px);min-width:160px;`;
 document.body.appendChild(playerMenu);
+window.closePlayerMenu=()=>{ playerMenu.style.display='none'; };
 let playerMenuTarget=null;
 
 function showPlayerMenu(socketId, screenX, screenY){
@@ -4277,7 +4278,7 @@ function showPlayerMenu(socketId, screenX, screenY){
       style="padding:9px 14px;cursor:pointer;border-radius:8px;font-size:0.88rem;display:flex;align-items:center;gap:8px;color:#FFD700;">
       💰 Send SpaceBucks
     </div>
-    <div class="pmItem" onclick="playerMenu.style.display='none'"
+    <div class="pmItem" onclick="window.closePlayerMenu()"
       style="padding:7px 14px;cursor:pointer;border-radius:8px;font-size:0.8rem;opacity:0.5;">
       Cancel
     </div>
