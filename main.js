@@ -766,6 +766,13 @@ let rocketVel = 0;
 let launchParticles = [];
 let rocketDone = false;
 
+// Listen for rocket launches from other players
+function setupRocketSocket(){
+  if(!socket) return;
+  socket.on('rocket:launch',()=>{ launchRocket(); });
+}
+const _rocketPoll=setInterval(()=>{ if(socket&&mySocketId){ setupRocketSocket(); clearInterval(_rocketPoll); }},1000);
+
 function launchRocket() {
   if(rocketLaunching) return;
   rocketLaunching = true;
@@ -1264,8 +1271,9 @@ function submitWish() {
   saveWish(text);
   wishCooldown = 20;
   closeWishBoard();
-  // 🚀 LAUNCH
+  // 🚀 LAUNCH — broadcast to all players
   launchRocket();
+  if(socket) socket.emit('rocket:launch');
 }
 
 function closeWishBoard() {
