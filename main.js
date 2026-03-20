@@ -3817,7 +3817,7 @@ function connectMultiplayer(password=''){
     return;
   }
   try {
-    socket = io(SERVER_URL, { transports:['websocket'], reconnectionAttempts:5 });
+    socket = io(SERVER_URL, { transports:['websocket','polling'], reconnectionAttempts:10, reconnectionDelay:2000 });
 
     socket.on('connect',()=>{
       mySocketId=socket.id;
