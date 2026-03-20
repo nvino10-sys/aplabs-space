@@ -2854,6 +2854,15 @@ async function enableMic(){
     });
     // Re-scan for nearby players now that mic is live — triggers fresh initiation
     setTimeout(()=>updateVoiceConnections(0), 500);
+    // Flush any pending requests that arrived before mic was ready
+    pendingVoiceRequests.forEach(fromId=>{
+      console.log('[VOICE] Flushing pending request from',fromId);
+      if(!peerConnections[fromId]){
+        createPeerConnection(fromId, true);
+        socket.emit('voice:readyToConnect',{to:fromId});
+      }
+    });
+    pendingVoiceRequests.clear();
   } catch(e){
     showNotification('Microphone access denied');
     console.warn('Mic error:',e);
@@ -2898,6 +2907,14 @@ setTimeout(()=>{
       });
       // Re-scan for nearby players now that mic is live
       setTimeout(()=>updateVoiceConnections(0), 500);
+      // Flush pending requests
+      pendingVoiceRequests.forEach(fromId=>{
+        if(!peerConnections[fromId]){
+          createPeerConnection(fromId, true);
+          socket.emit('voice:readyToConnect',{to:fromId});
+        }
+      });
+      pendingVoiceRequests.clear();
     } catch(e){
       const isHttp=location.protocol==='http:'&&!location.hostname.includes('localhost')&&!location.hostname.includes('127.0');
       const msg=isHttp
@@ -3938,16 +3955,8 @@ function connectMultiplayer(password=''){
     socket.on('voice:request',(data)=>{
       console.log('[VOICE] Received voice:request from',data.from,'micActive=',micActive,'hasStream=',!!localStream);
       if(!micActive||!localStream){
-        // Mic not ready yet — wait up to 3s then retry
-        console.log('[VOICE] Mic not ready, queuing...');
-        setTimeout(()=>{
-          console.log('[VOICE] Retrying voice:request from',data.from,'micActive=',micActive,'hasStream=',!!localStream);
-          if(micActive&&localStream){
-            createPeerConnection(data.from, true);
-            socket.emit('voice:readyToConnect',{to:data.from});
-            showNotification('🎤 Voice connecting...');
-          }
-        },3000);
+        console.log('[VOICE] Mic not ready, storing pending request from',data.from);
+        pendingVoiceRequests.add(data.from);
         return;
       }
       createPeerConnection(data.from, true);
@@ -5376,6 +5385,7 @@ function buildPetMesh(type){
 
 // Pet state
 let myPet=null;
+const pendingVoiceRequests=new Set(); // socket IDs that tried to connect before our mic was ready
 let myPetSlots=[];
 let myPetDust=0;
 
