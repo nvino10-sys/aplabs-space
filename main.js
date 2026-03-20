@@ -2774,6 +2774,7 @@ function updateVoiceConnections(delta){
 async function enableMic(){
   try{
     if(!mySocketId){ showNotification('Connect to multiplayer first!'); return; }
+    console.log('[LIVEKIT] connecting as:', myUsername);
     const res=await fetch(`${SERVER_URL}/livekit-token?username=${encodeURIComponent(myUsername)}&room=aplabs-world`);
     if(!res.ok) throw new Error('Token fetch failed: '+res.status);
     const {token}=await res.json();
@@ -3847,61 +3848,6 @@ function connectMultiplayer(password=''){
       if(p) showNotification(`${p.data.username} left`);
       removeRemotePlayer(data.socketId);
       closePeer(data.socketId); // clean up voice
-    });
-
-    // ── WebRTC Signaling ──
-    socket.on('voice:request',(data)=>{
-      console.log('[VOICE] Received voice:request from',data.from,'micActive=',micActive,'hasStream=',!!localStream);
-      if(!micActive||!localStream){
-        console.log('[VOICE] Mic not ready, storing pending request from',data.from);
-        pendingVoiceRequests.add(data.from);
-        return;
-      }
-      createPeerConnection(data.from, true);
-      socket.emit('voice:readyToConnect',{to:data.from});
-      showNotification('🎤 Voice connecting...');
-    });
-
-    socket.on('voice:readyToConnect',async(data)=>{
-      console.log('[VOICE] Received readyToConnect from',data.from);
-      if(!micActive||!localStream) return;
-      const pc=createPeerConnection(data.from, false);
-      try{
-        const offer=await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit('voice:offer',{to:data.from,sdp:pc.localDescription});
-      }catch(e){ console.warn('voice offer err',e); }
-    });
-
-    socket.on('voice:offer',async(data)=>{
-      console.log('[VOICE] Received offer from',data.from);
-      if(!micActive) return;
-      const pc=peerConnections[data.from]?.pc || createPeerConnection(data.from, true);
-      try{
-        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-        const answer=await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        socket.emit('voice:answer',{to:data.from,sdp:pc.localDescription});
-        showNotification('🎤 Voice connected!');
-      }catch(e){ console.warn('voice offer err',e); }
-    });
-
-    socket.on('voice:answer',async(data)=>{
-      console.log('[VOICE] Received answer from',data.from);
-      const peer=peerConnections[data.from];
-      if(!peer) return;
-      try{
-        await peer.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-        showNotification('🎤 Voice active!');
-      }
-      catch(e){ console.warn('voice answer err',e); }
-    });
-
-    socket.on('voice:ice',async(data)=>{
-      const peer=peerConnections[data.from];
-      if(!peer) return;
-      try{ await peer.pc.addIceCandidate(new RTCIceCandidate(data.candidate)); }
-      catch(e){ console.warn('voice ice err',e); }
     });
 
     socket.on('player:chatMsg',(data)=>{
