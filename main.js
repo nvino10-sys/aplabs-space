@@ -2694,15 +2694,16 @@ chatBtn.addEventListener('touchend',e=>{
 },{passive:false});
 document.body.appendChild(chatBtn);
 
-// Load LiveKit SDK
-(()=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js';document.head.appendChild(s);})();
-
-// ── LIVEKIT VOICE CHAT ──
-const VOICE_RANGE=18, VOICE_FALLOFF=6;
-let livekitRoom=null;
-let micActive=false;
-let lvkParticipantVolumes={}; // identity -> gainNode
-const peerConnections={}; // kept as stub so volume update code doesn't break
+// ── MICROPHONE BUTTON ──
+let micActive=false, micStream=null;
+let localStream=null;
+const peerConnections={}; // socketId -> {pc, gainNode, audioEl}
+const VOICE_RANGE=18, VOICE_FALLOFF=6; // units
+const ICE_SERVERS=[
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'stun:stun1.l.google.com:19302'},
+  {urls:'turns:turn.cloudflare.com:5349', username:'free', credential:'free'},
+];
 
 const micBtn=document.createElement('div');
 micBtn.innerHTML='🎤';
@@ -2712,66 +2713,161 @@ micBtn.style.cssText=`position:fixed;bottom:236px;right:20px;width:52px;height:5
   cursor:pointer;user-select:none;z-index:100;backdrop-filter:blur(6px);`;
 document.body.appendChild(micBtn);
 
+// Mic permission confirmation overlay
 const micConfirmOverlay=document.createElement('div');
 micConfirmOverlay.style.cssText=`position:fixed;inset:0;background:rgba(0,0,0,0.85);
-  display:none;align-items:center;justify-content:center;z-index:500;`;
+  display:none;align-items:center;justify-content:center;z-index:400;`;
 micConfirmOverlay.innerHTML=`
-  <div style="background:#111;border:1px solid rgba(255,255,255,0.15);border-radius:16px;
-    padding:24px;max-width:300px;text-align:center;color:white;font-family:sans-serif;">
-    <div style="font-size:2rem;margin-bottom:10px;">🎤</div>
-    <h3 style="margin:0 0 8px;">Voice Chat</h3>
-    <p style="opacity:0.6;font-size:0.85rem;margin-bottom:16px;">
+  <div style="max-width:380px;background:rgba(20,20,30,0.98);border:1px solid rgba(255,100,100,0.4);
+    border-radius:20px;padding:32px 28px;text-align:center;color:white;font-family:sans-serif;">
+    <div style="font-size:3rem;margin-bottom:12px;">🎤</div>
+    <h2 style="margin:0 0 10px;font-size:1.4rem;">Enable Voice Chat?</h2>
+    <p style="opacity:0.65;line-height:1.7;margin-bottom:8px;font-size:0.9rem;">
       Nearby players will hear you. Works up to ${VOICE_RANGE} units away — fades with distance.
     </p>
-    <div style="display:flex;gap:10px;justify-content:center;">
+    <p style="opacity:0.5;font-size:0.8rem;margin-bottom:24px;line-height:1.6;">
+      ⚠️ Others will hear your mic while active. Tap 🔴 to turn off anytime.
+    </p>
+    <div style="display:flex;gap:12px;justify-content:center;">
       <button id="micYes" style="background:#CC3333;color:white;border:none;border-radius:10px;
-        padding:10px 22px;cursor:pointer;font-size:14px;">Enable Mic</button>
-      <button id="micNo" style="background:rgba(255,255,255,0.1);color:white;border:none;
-        border-radius:10px;padding:10px 22px;cursor:pointer;font-size:14px;">Cancel</button>
+        padding:12px 28px;font-size:15px;font-weight:bold;cursor:pointer;">
+        Yes, enable mic
+      </button>
+      <button id="micNo" style="background:rgba(255,255,255,0.1);color:white;
+        border:1px solid rgba(255,255,255,0.2);border-radius:10px;
+        padding:12px 28px;font-size:15px;cursor:pointer;">
+        Cancel
+      </button>
     </div>
-  </div>`;
+  </div>
+`;
 document.body.appendChild(micConfirmOverlay);
 
-async function connectLiveKit(){
-  if(livekitRoom) return;
-  if(!myUsername){ showNotification('Please log in first'); return; }
-  // Get token from server
-  const resp=await fetch('https://aplabs-server-production.up.railway.app/livekit-token?username='+encodeURIComponent(myUsername));
-  const {token}=await resp.json();
-  const {Room,RoomEvent,Track,createLocalTracks}=window.LivekitClient;
-  const room=new Room({adaptiveStream:true,dynacast:true});
-  livekitRoom=room;
-
-  room.on(RoomEvent.TrackSubscribed,(track,pub,participant)=>{
-    if(track.kind!==Track.Kind.Audio) return;
-    const el=track.attach();
-    el.style.display='none';
-    document.body.appendChild(el);
-    console.log('[LK] subscribed audio from',participant.identity);
-    showNotification('🎙️ Voice connected!');
-  });
-
-  room.on(RoomEvent.TrackUnsubscribed,(track)=>{ track.detach(); });
-
-  await room.connect('wss://aplabs-space-zefyhivd.livekit.cloud', token);
-  console.log('[LK] connected to LiveKit room');
-
-  // Publish mic
-  const tracks=await createLocalTracks({audio:true,video:false});
-  for(const track of tracks){
-    await room.localParticipant.publishTrack(track);
-  }
-  micActive=true;
-  micBtn.style.background='rgba(180,0,0,0.7)';
-  micBtn.style.borderColor='rgba(255,80,80,0.8)';
-  micBtn.innerHTML='🔴';
-  micBtn.title='Mic ON — tap to mute';
-  showNotification('🎤 Voice on!');
+// ── WebRTC helpers ──
+// Shared AudioContext resumed after user gesture
+let sharedAudioCtx=null;
+function getAudioCtx(){
+  if(!sharedAudioCtx||sharedAudioCtx.state==='closed') sharedAudioCtx=new AudioContext();
+  if(sharedAudioCtx.state==='suspended') sharedAudioCtx.resume();
+  return sharedAudioCtx;
 }
 
-function disconnectLiveKit(){
-  if(livekitRoom){ livekitRoom.disconnect(); livekitRoom=null; }
+function createPeerConnection(remoteSid,polite){
+  if(peerConnections[remoteSid]) return peerConnections[remoteSid].pc;
+  const pc=new RTCPeerConnection({iceServers:ICE_SERVERS,iceCandidatePoolSize:10,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require"});
+  if(localStream) localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+  pc.onicecandidate=e=>{ if(e.candidate&&socket) socket.emit('voice:ice',{to:remoteSid,candidate:e.candidate}); };
+  const audioEl=document.createElement('audio');
+  audioEl.autoplay=true;
+  audioEl.style.display='none';
+  document.body.appendChild(audioEl);
+  pc.ontrack=e=>{
+    console.log('[VOICE] Got remote track from',remoteSid,'kind:',e.track.kind,'streams:',e.streams.length);
+    const stream=e.streams[0]||new MediaStream([e.track]);
+    audioEl.srcObject=stream;
+    audioEl.volume=1;
+    audioEl.play().catch(err=>console.warn('[VOICE] play() blocked:',err));
+    showNotification('🎙️ Voice connected!');
+  };
+  pc.onconnectionstatechange=()=>{ console.log('[VOICE] state:',pc.connectionState,'with',remoteSid); if(pc.connectionState==='failed'||pc.connectionState==='closed') closePeer(remoteSid); };
+  pc.oniceconnectionstatechange=()=>console.log('[VOICE] ICE:',pc.iceConnectionState,'with',remoteSid);
+  peerConnections[remoteSid]={pc,gainNode:null,audioEl,connected:false};
+  return pc;
+}
+function closePeer(sid){
+  const peer=peerConnections[sid]; if(!peer) return;
+  try{ peer.pc.close(); peer.audioEl.remove(); }catch(e){}
+  delete peerConnections[sid];
+}
+function closeAllPeers(){ Object.keys(peerConnections).forEach(closePeer); }
+function updateVoiceVolumes(){
+  if(!micActive) return;
+  Object.entries(otherPlayers).forEach(([sid,p])=>{
+    const peer=peerConnections[sid];
+    if(!peer||!peer.audioEl) return;
+    const dx=camera.position.x-p.group.position.x;
+    const dz=camera.position.z-p.group.position.z;
+    const dist=Math.sqrt(dx*dx+dz*dz);
+    const vol=dist>VOICE_RANGE?0:dist<VOICE_FALLOFF?1:1-(dist-VOICE_FALLOFF)/(VOICE_RANGE-VOICE_FALLOFF);
+    peer.audioEl.volume=Math.max(0,Math.min(1,vol));
+  });
+}
+
+// Check which players need voice connections opened/closed
+let voiceCheckTimer=0;
+function updateVoiceConnections(delta){
+  if(!micActive||!socket||!mySocketId) return;
+  voiceCheckTimer+=delta;
+  if(voiceCheckTimer<1.5) return;
+  voiceCheckTimer=0;
+
+  const inRange=new Set();
+  Object.entries(otherPlayers).forEach(([sid,p])=>{
+    const dx=camera.position.x-p.group.position.x;
+    const dz=camera.position.z-p.group.position.z;
+    const dist=Math.sqrt(dx*dx+dz*dz);
+    console.log(`[VOICE] Player ${sid} dist=${dist.toFixed(1)} range=${VOICE_RANGE}`);
+    if(dist<VOICE_RANGE) inRange.add(sid);
+  });
+
+  console.log(`[VOICE] inRange=${inRange.size} myId=${mySocketId} peers=${Object.keys(peerConnections).length}`);
+
+  inRange.forEach(sid=>{
+    if(!peerConnections[sid]){
+      console.log(`[VOICE] myId=${mySocketId} theirId=${sid} iInitiate=${mySocketId<sid}`);
+      if(mySocketId < sid){
+        createPeerConnection(sid, false);
+        socket.emit('voice:request',{to:sid});
+        console.log('[VOICE] Sent voice:request to',sid);
+      } else {
+        console.log('[VOICE] Waiting for them to initiate...');
+      }
+    }
+  });
+
+  Object.keys(peerConnections).forEach(sid=>{
+    if(!inRange.has(sid)) closePeer(sid);
+  });
+
+  updateVoiceVolumes();
+}
+
+async function enableMic(){
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}, video:false});
+    micActive=true;
+    micBtn.style.background='rgba(180,0,0,0.7)';
+    micBtn.style.borderColor='rgba(255,80,80,0.8)';
+    micBtn.innerHTML='🔴';
+    micBtn.title='Mic ON — tap to mute';
+    // Resume AudioContext now that we have a user gesture
+    getAudioCtx();
+    showNotification('🎤 Voice on — nearby players can hear you');
+    // Add tracks to existing peer connections
+    Object.values(peerConnections).forEach(({pc})=>{
+      localStream.getTracks().forEach(t=>{ try{pc.addTrack(t,localStream);}catch(e){} });
+    });
+    // Re-scan for nearby players now that mic is live — triggers fresh initiation
+    setTimeout(()=>updateVoiceConnections(0), 500);
+    // Flush any pending requests that arrived before mic was ready
+    pendingVoiceRequests.forEach(fromId=>{
+      console.log('[VOICE] Flushing pending request from',fromId);
+      if(!peerConnections[fromId]){
+        createPeerConnection(fromId, true);
+        socket.emit('voice:readyToConnect',{to:fromId});
+      }
+    });
+    pendingVoiceRequests.clear();
+  } catch(e){
+    showNotification('Microphone access denied');
+    console.warn('Mic error:',e);
+  }
+}
+
+function disableMic(){
+  if(localStream){ localStream.getTracks().forEach(t=>t.stop()); localStream=null; }
   micActive=false;
+  closeAllPeers();
   micBtn.style.background='rgba(0,0,0,0.45)';
   micBtn.style.borderColor='rgba(255,255,255,0.25)';
   micBtn.innerHTML='🎤';
@@ -2780,42 +2876,1131 @@ function disconnectLiveKit(){
 }
 
 micBtn.addEventListener('click',()=>{
-  if(micActive){ disconnectLiveKit(); return; }
+  if(micActive){ disableMic(); return; }
   micConfirmOverlay.style.display='flex';
 });
-micBtn.addEventListener('touchend',e=>{e.preventDefault();micBtn.click();},{passive:false});
+micBtn.addEventListener('touchend',e=>{e.preventDefault(); micBtn.click();},{passive:false});
 
 setTimeout(()=>{
-  document.getElementById('micYes')?.addEventListener('click',async()=>{
+  document.getElementById('micYes')?.addEventListener('click', async ()=>{
     micConfirmOverlay.style.display='none';
-    await connectLiveKit();
+    // getUserMedia MUST be called directly in click handler to preserve user gesture
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio:{echoCancellation:true,noiseSuppression:true,sampleRate:48000},
+        video:false
+      });
+      micActive=true;
+      micBtn.style.background='rgba(180,0,0,0.7)';
+      micBtn.style.borderColor='rgba(255,80,80,0.8)';
+      micBtn.innerHTML='🔴';
+      micBtn.title='Mic ON — tap to mute';
+      showNotification('🎤 Voice on — nearby players can hear you');
+      // Add tracks to any existing peer connections
+      Object.values(peerConnections).forEach(({pc})=>{
+        localStream.getTracks().forEach(t=>{ try{pc.addTrack(t,localStream);}catch(e){} });
+      });
+      // Re-scan for nearby players now that mic is live
+      setTimeout(()=>updateVoiceConnections(0), 500);
+      // Flush pending requests
+      pendingVoiceRequests.forEach(fromId=>{
+        if(!peerConnections[fromId]){
+          createPeerConnection(fromId, true);
+          socket.emit('voice:readyToConnect',{to:fromId});
+        }
+      });
+      pendingVoiceRequests.clear();
+    } catch(e){
+      const isHttp=location.protocol==='http:'&&!location.hostname.includes('localhost')&&!location.hostname.includes('127.0');
+      const msg=isHttp
+        ? '🔒 Voice requires HTTPS. Ask the host to enable SSL.'
+        : '🎤 Mic denied — tap the 🔒 icon in your browser address bar and allow microphone';
+      // Show a proper instructions overlay instead of just a toast
+      const errDiv=document.createElement('div');
+      errDiv.style.cssText=`position:fixed;inset:0;background:rgba(0,0,0,0.88);display:flex;
+        align-items:center;justify-content:center;z-index:500;`;
+      errDiv.innerHTML=`<div style="max-width:320px;background:#1a0000;border:2px solid #FF4444;
+        border-radius:16px;padding:24px;text-align:center;color:white;font-family:sans-serif;">
+        <div style="font-size:2rem;margin-bottom:10px;">🚫</div>
+        <h3 style="margin:0 0 10px;">Microphone Blocked</h3>
+        <p style="opacity:0.8;font-size:0.85rem;line-height:1.6;margin-bottom:16px;">${msg}</p>
+        <p style="opacity:0.55;font-size:0.75rem;margin-bottom:16px;">On Chrome/Firefox mobile:<br>
+        Tap the 🔒 lock icon → Site settings → Microphone → Allow</p>
+        <button onclick="this.parentElement.parentElement.remove()"
+          style="background:#AA2222;color:white;border:none;border-radius:8px;
+          padding:10px 24px;cursor:pointer;font-size:14px;">OK</button>
+      </div>`;
+      document.body.appendChild(errDiv);
+      console.warn('Mic error:',e);
+    }
   });
   document.getElementById('micNo')?.addEventListener('click',()=>{
     micConfirmOverlay.style.display='none';
   });
-},800);
+},200);
 
-// Volume fading by distance — LiveKit audio elements
-function updateVoiceVolumes(){
-  if(!livekitRoom) return;
-  livekitRoom.participants.forEach((participant)=>{
-    // Find their socket player by matching username to identity
-    const matchSid=Object.keys(otherPlayers).find(sid=>{
-      const p=otherPlayers[sid];
-      return p&&p.username===participant.identity;
+// ─── TELEPORT MENU ────────────────────────────────────────
+const destinations={
+  '🌊 Water Slide':{x:SLIDE_X, z:SLIDE_Z, y:towerH+1.7, onTop:true},
+  'Campus Entrance':{x:0,z:8},
+  'Library':{x:0,z:-14},
+  'Cafeteria':{x:-16,z:-21},
+  'Concert Hall':{x:15,z:-5},
+  'City Center':{x:34,z:-55},
+  'Mini Golf':{x:-33,z:-4},
+  '🚀 Launch Pad':{x:LC_X,z:LC_Z-12},
+  '🎰 The Lounge':{x:LX,z:LZ+8},
+};
+const menuList=document.createElement('div');
+menuList.style.cssText=`position:fixed;bottom:70px;right:20px;background:rgba(0,0,0,0.75);border:1px solid rgba(255,255,255,0.2);border-radius:14px;overflow:hidden;display:none;z-index:100;backdrop-filter:blur(12px);min-width:170px;`;
+Object.entries(destinations).forEach(([name,pos])=>{
+  const item=document.createElement('div');
+  item.textContent=name;
+  item.style.cssText=`padding:11px 18px;color:white;font-family:sans-serif;font-size:14px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.08);transition:background 0.15s;`;
+  item.addEventListener('mouseover',()=>item.style.background='rgba(255,255,255,0.15)');
+  item.addEventListener('mouseout',()=>item.style.background='transparent');
+  const go=()=>{
+    camera.position.set(pos.x, pos.onTop ? pos.y : GROUND_Y, pos.z+(pos.onTop?0:4));
+    if(pos.onTop){ velocityY=0; isGrounded=true; }
+    menuList.style.display='none'; menuOpen=false;
+  };
+  item.addEventListener('click',go);item.addEventListener('touchend',go);
+  menuList.appendChild(item);
+});
+const menuBtn=document.createElement('div');
+menuBtn.innerHTML='Places';
+menuBtn.style.cssText=`position:fixed;bottom:20px;right:20px;padding:10px 18px;background:rgba(0,0,0,0.55);border:2px solid rgba(255,255,255,0.35);border-radius:12px;color:white;font-family:sans-serif;font-size:14px;font-weight:bold;cursor:pointer;user-select:none;z-index:100;backdrop-filter:blur(8px);`;
+let menuOpen=false;
+menuBtn.addEventListener('click',()=>{menuOpen=!menuOpen;menuList.style.display=menuOpen?'block':'none';});
+document.body.appendChild(menuList);document.body.appendChild(menuBtn);
+
+// ─── COLLISION ────────────────────────────────────────────
+const PLAYER_RADIUS=0.5;
+function resolveCollision(pos){
+  for(const c of colliders){
+    const cx=Math.max(c.minX,Math.min(pos.x,c.maxX));
+    const cz=Math.max(c.minZ,Math.min(pos.z,c.maxZ));
+    const dx=pos.x-cx,dz=pos.z-cz;
+    const dist=Math.sqrt(dx*dx+dz*dz);
+    if(dist<PLAYER_RADIUS&&dist>0){const push=(PLAYER_RADIUS-dist)/dist;pos.x+=dx*push;pos.z+=dz*push;}
+  }
+  for(const c of circColliders){
+    const dx=pos.x-c.cx,dz=pos.z-c.cz;
+    const dist=Math.sqrt(dx*dx+dz*dz);
+    const minD=PLAYER_RADIUS+c.r;
+    if(dist<minD&&dist>0){const push=(minD-dist)/dist;pos.x+=dx*push;pos.z+=dz*push;}
+  }
+  for(const t of treeColliders){
+    const dx=pos.x-t.cx,dz=pos.z-t.cz;
+    const dist=Math.sqrt(dx*dx+dz*dz);
+    if(dist<PLAYER_RADIUS+t.r&&dist>0){const push=(PLAYER_RADIUS+t.r-dist)/dist;pos.x+=dx*push;pos.z+=dz*push;}
+  }
+}
+
+// ─── UPDATE ───────────────────────────────────────────────
+const moveDir=new THREE.Vector3();
+const clock=new THREE.Clock();
+let armBob=0,totalTime=0,blimpAngle=0;
+
+function update(){
+  const delta=Math.min(clock.getDelta(),0.05);
+  totalTime+=delta;
+
+  // animBlimp defined first so it's available to all blocks below
+  const animBlimp=()=>{
+    blimpAngle-=delta*0.12;
+    blimpGroup.position.x=Math.cos(blimpAngle)*38;
+    blimpGroup.position.z=Math.sin(blimpAngle)*38-18;
+    blimpGroup.position.y=22+Math.sin(totalTime*0.4)*1.5;
+    blimpGroup.rotation.y=-blimpAngle+Math.PI/2;
+  };
+
+  // Fireworks
+  if(fireworksActive){
+    fireworkTimer+=delta;
+    if(fireworkTimer>0.5&&fireworkBurstCount<12){launchFirework();fireworkTimer=0;fireworkBurstCount++;if(fireworkBurstCount>=12)fireworksActive=false;}
+  }
+  for(let i=fireworkParticles.length-1;i>=0;i--){
+    const p=fireworkParticles[i];
+    p.mesh.position.x+=p.vel.x;p.mesh.position.y+=p.vel.y;p.vel.y-=0.003;p.mesh.position.z+=p.vel.z;
+    p.life-=p.decay;p.mesh.material.opacity=p.life;p.mesh.material.transparent=true;
+    if(p.life<=0||p.mesh.position.y>60||p.mesh.position.y<-10){scene.remove(p.mesh);fireworkParticles.splice(i,1);}
+  }
+
+  // ── LADDER CLIMB ──
+  {const dx=camera.position.x-LADDER_X, dz=camera.position.z-LADDER_Z;
+   nearLadder = Math.sqrt(dx*dx+dz*dz)<1.8;}
+  // Update jump button label
+  jumpBtn.innerHTML = nearLadder ? '⬆<br><span style="font-size:9px;opacity:0.7">CLIMB</span>' : '⬆';
+
+  const climbUp = nearLadder && (keys['KeyW']||keys['ArrowUp']||(joystick.active&&joystick.dy<-0.3));
+  const climbDown = nearLadder && (keys['KeyS']||keys['ArrowDown']||(joystick.active&&joystick.dy>0.3));
+
+  if(climbUp){
+    onLadder=true;
+    camera.position.x=LADDER_X; camera.position.z=LADDER_Z;
+    camera.position.y=Math.min(camera.position.y+5*delta, towerH+1.7);
+    velocityY=0; isGrounded=false;
+  } else if(climbDown&&camera.position.y>GROUND_Y+0.1){
+    onLadder=true;
+    camera.position.x=LADDER_X; camera.position.z=LADDER_Z;
+    camera.position.y=Math.max(camera.position.y-5*delta, GROUND_Y);
+    velocityY=0;
+    if(camera.position.y<=GROUND_Y+0.2) isGrounded=true;
+  } else {
+    onLadder=false;
+  }
+  if(onLadder){ velocityY=0; isGrounded=false; }
+
+  // ── SLIDE MODE ──
+  if(slideMode){
+    const loopBoost=(slideT>0.28&&slideT<0.58)?1.5:1.0;
+    const endEase=slideT>0.88?0.7:1.0;
+    slideT+=(delta/SLIDE_DURATION)*loopBoost*endEase;
+    if(slideT>=1){ exitSlide(); }
+    else {
+      const t=Math.min(slideT,0.998);
+      const tAhead=Math.min(t+0.015,0.998);
+      const riderPos=slideCurve.getPoint(t);
+      const riderAhead=slideCurve.getPoint(tAhead);
+      // Move rider body
+      riderGroup.position.copy(riderPos);
+      const fwd=riderAhead.clone().sub(riderPos).normalize();
+      riderGroup.rotation.y=Math.atan2(fwd.x,fwd.z);
+      riderGroup.rotation.x=Math.asin(Math.max(-0.9,Math.min(0.9,-fwd.y)))*0.7;
+      // Arm flail on loop
+      const loopSection=(t>0.3&&t<0.55);
+      [2,4].forEach(idx=>{ if(riderGroup.children[idx]) riderGroup.children[idx].rotation.z=loopSection?Math.sin(totalTime*12)*0.6:0; });
+      // Chase camera — behind and above rider
+      const camOffset=new THREE.Vector3(-fwd.x*7,4,-fwd.z*7);
+      const targetCamPos=riderPos.clone().add(camOffset);
+      camera.position.lerp(targetCamPos,0.28);
+      const lookTarget=riderPos.clone().add(new THREE.Vector3(0,0.8,0));
+      const diff=lookTarget.clone().sub(camera.position).normalize();
+      yaw=Math.atan2(diff.x,diff.z);
+      pitch=Math.asin(Math.max(-0.9,Math.min(0.9,diff.y)));
+      camera.rotation.order='YXZ';
+      camera.rotation.y=yaw; camera.rotation.x=pitch;
+    }
+    clouds.forEach(c=>{c.group.position.x+=c.speed*delta;if(c.group.position.x>100)c.group.position.x=-100;});
+    flags.forEach(f=>{f.rotation.z=Math.sin(totalTime*2.5)*0.12;});
+    animBlimp();
+    updateAnimals(delta,totalTime);
+    updateRobots(delta,totalTime);
+    updateLounge(delta,totalTime);
+    updateRocket(delta,totalTime);
+    // Broadcast slide position so other players can see us on the tube
+    if(socket&&mySocketId&&slideMode){
+      posUpdateTimer+=delta;
+      if(posUpdateTimer>0.05){
+        const rp=slideCurve.getPoint(Math.min(slideT,0.998));
+        socket.emit('player:move',{x:rp.x,y:rp.y,z:rp.z,rotY:yaw,sliding:true});
+        posUpdateTimer=0;
+      }
+    }
+  }
+
+  // Splash particles
+  for(let i=splashParticles.length-1;i>=0;i--){
+    const sp=splashParticles[i];
+    sp.mesh.position.x+=sp.vel.x; sp.mesh.position.y+=sp.vel.y; sp.vel.y-=0.008;
+    sp.mesh.position.z+=sp.vel.z; sp.life-=sp.decay;
+    sp.mesh.material.opacity=sp.life;
+    if(sp.life<=0||sp.mesh.position.y<-1){scene.remove(sp.mesh);splashParticles.splice(i,1);}
+  }
+
+  if(slideMode) return;
+
+  if(golfMode){
+    const padSpeed=1.8;
+    if(paddleLHeld)yaw+=padSpeed*delta;
+    if(paddleRHeld)yaw-=padSpeed*delta;
+    camera.rotation.order='YXZ';camera.rotation.y=yaw;camera.rotation.x=-0.28;
+    camera.position.x=ballPos.x+Math.sin(yaw)*5;
+    camera.position.z=ballPos.z+Math.cos(yaw)*5;
+    camera.position.y=ballPos.y+3.8;
+    const aimDir=new THREE.Vector3(-Math.sin(yaw),0,-Math.cos(yaw));
+    aimArrow.position.set(ballPos.x+aimDir.x*1.2,ballPos.y+0.15,ballPos.z+aimDir.z*1.2);
+    aimArrow.rotation.set(Math.PI/2,0,-yaw);
+    aimArrow.material.opacity=ballInMotion?0:0.75;
+    if(powerCharging&&!ballInMotion){powerAmount=Math.min(powerAmount+delta*GOLF_FILL_RATE,100);powerFill.style.width=powerAmount+'%';}
+    if(ballInMotion){
+      ballPos.x+=ballVel.x;ballPos.z+=ballVel.y;
+      ballVel.multiplyScalar(0.975);
+      resolveBallVsBumpers();
+      golfBallMesh.position.set(ballPos.x,0.13,ballPos.z);
+      mpGolfBroadcastBallPos(); // spectator cam update
+      if(ballVel.length()<0.0008){
+        ballInMotion=false;ballVel.set(0,0);
+        mpGolfBallStopped(); // notify server in mp match
+        if(!mpGolf.active){ // solo mode cup detection only
+          for(const cup of golfCupMeshes){
+            const dx=ballPos.x-cup.x,dz=ballPos.z-cup.z;
+            if(Math.sqrt(dx*dx+dz*dz)<0.45){
+              playCupSound();golfTotalStrokes[cup.hole]=golfStrokes;
+              showScoreFlash(cup.hole+1,golfStrokes,golfHoles[cup.hole].par);
+              golfBallMesh.visible=false;aimArrow.visible=false;
+              setTimeout(()=>{
+                if(cup.hole<golfHoles.length-1){enterGolf(cup.hole+1);}
+                else{showScorecard();golfHUD.style.display='none';golfExitBtn.style.display='none';golfPaddleL.style.display='none';golfPaddleR.style.display='none';}
+              },2400);
+              break;
+            }
+          }
+        }
+      }
+    }
+    clouds.forEach(c=>{c.group.position.x+=c.speed*delta;if(c.group.position.x>100)c.group.position.x=-100;});
+    flags.forEach(f=>{f.rotation.z=Math.sin(totalTime*2.5)*0.12;});
+    animBlimp();return;
+  }
+
+  if(inRoom||isSitting){
+    clouds.forEach(c=>{c.group.position.x+=c.speed*delta;if(c.group.position.x>100)c.group.position.x=-100;});
+    flags.forEach(f=>{f.rotation.z=Math.sin(totalTime*2.5)*0.12;});
+    animBlimp();
+    updateRocket(delta,totalTime);
+    return;
+  }
+
+  camera.rotation.order='YXZ';camera.rotation.y=yaw;camera.rotation.x=pitch;
+  moveDir.set(0,0,0);
+  const forward=new THREE.Vector3(-Math.sin(yaw),0,-Math.cos(yaw));
+  const right=new THREE.Vector3(Math.cos(yaw),0,-Math.sin(yaw));
+  if(keys['KeyW']||keys['ArrowUp'])    moveDir.addScaledVector(forward, 1);
+  if(keys['KeyS']||keys['ArrowDown'])  moveDir.addScaledVector(forward,-1);
+  if(keys['KeyA']||keys['ArrowLeft'])  moveDir.addScaledVector(right,  -1);
+  if(keys['KeyD']||keys['ArrowRight']) moveDir.addScaledVector(right,   1);
+  if(joystick.active){
+    moveDir.addScaledVector(forward,-Math.max(-1,Math.min(1,joystick.dy)));
+    moveDir.addScaledVector(right,   Math.max(-1,Math.min(1,joystick.dx)));
+  }
+
+  if(flyMode){
+    // Fly mode: full 3D movement, no gravity, fast
+    const flySpeed = 18;
+    const flyDir = new THREE.Vector3(-Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw)*Math.cos(pitch));
+    const flyRight = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    const flyMoveDir = new THREE.Vector3();
+    if(keys['KeyW']||keys['ArrowUp'])    flyMoveDir.addScaledVector(flyDir, 1);
+    if(keys['KeyS']||keys['ArrowDown'])  flyMoveDir.addScaledVector(flyDir,-1);
+    if(keys['KeyA']||keys['ArrowLeft'])  flyMoveDir.addScaledVector(flyRight,-1);
+    if(keys['KeyD']||keys['ArrowRight']) flyMoveDir.addScaledVector(flyRight, 1);
+    if(keys['Space'])  flyMoveDir.y += 1;
+    if(keys['ShiftLeft']||keys['ShiftRight']) flyMoveDir.y -= 1;
+    // Joystick for mobile fly
+    if(joystick.active){
+      flyMoveDir.addScaledVector(flyDir,-Math.max(-1,Math.min(1,joystick.dy)));
+      flyMoveDir.addScaledVector(flyRight,Math.max(-1,Math.min(1,joystick.dx)));
+    }
+    if(flyMoveDir.length()>0) flyMoveDir.normalize();
+    camera.position.addScaledVector(flyMoveDir, flySpeed*delta);
+    isGrounded=false;
+  } else {
+    const moving=moveDir.length()>0;
+    if(moving){moveDir.normalize();camera.position.addScaledVector(moveDir,6*delta);armBob+=delta*8;if(isGrounded)playFootstep();}
+    resolveCollision(camera.position);
+
+    // Hill terrain following
+    const hillSurfaceY=getTerrainY(camera.position.x,camera.position.z);
+    let targetY=GROUND_Y+hillSurfaceY;
+    // Roof platform landing
+    for(const r of roofPlatforms){
+      if(camera.position.x>r.minX&&camera.position.x<r.maxX&&
+         camera.position.z>r.minZ&&camera.position.z<r.maxZ&&
+         camera.position.y>=r.y-0.5&&camera.position.y<=r.y+3){
+        targetY=Math.max(targetY,r.y); break;
+      }
+    }
+    if(!isGrounded){
+      velocityY-=GRAVITY*delta;camera.position.y+=velocityY*delta;
+      if(camera.position.y<=targetY){camera.position.y=targetY;velocityY=0;isGrounded=true;}
+    } else {
+      camera.position.y+=(targetY-camera.position.y)*0.25;
+      if(camera.position.y<targetY)camera.position.y=targetY;
+    }
+
+    const swing=moving?Math.sin(armBob)*0.06:0;
+    leftArm.position.z=-0.15+swing;rightArm.position.z=-0.15-swing;
+    if(moving){const rdx=moveDir.dot(right),rdz=-moveDir.dot(forward);updateDirIndicator(rdx,rdz);}
+    else{updateDirIndicator(0,0);}
+  }
+
+  // Update coordinate HUD
+  const cx=camera.position.x.toFixed(1);
+  const cy=camera.position.y.toFixed(1);
+  const cz=camera.position.z.toFixed(1);
+  const flySymbol=flyMode?'✈ ':'';
+  coordHUD.innerHTML=`${flySymbol}${cx}, ${cy}, ${cz} <span style="opacity:0.4;font-size:9px;">F=fly</span>`;
+  coordHUD.style.color=flyMode?'#FFD700':'#00FF99';
+  coordHUD.style.borderColor=flyMode?'rgba(255,200,0,0.5)':'rgba(0,255,150,0.25)';
+  updateCompass(yaw);
+
+  clouds.forEach(c=>{c.group.position.x+=c.speed*delta;c.group.position.y=c.baseY+Math.sin(totalTime*0.2)*0.5;if(c.group.position.x>100)c.group.position.x=-100;});
+  flags.forEach(f=>{f.rotation.z=Math.sin(totalTime*2.5)*0.12;f.rotation.y=Math.sin(totalTime*1.8)*0.05;});
+  butterflies.forEach(b=>{
+    b.angle+=b.speed*delta;
+    b.group.position.x=b.centerX+Math.cos(b.angle)*b.radius;
+    b.group.position.z=b.centerZ+Math.sin(b.angle)*b.radius*0.6;
+    b.group.position.y=b.baseY+Math.sin(totalTime*3+b.phase)*0.3;
+    b.group.rotation.y=-b.angle+Math.PI/2;
+    const flap=Math.sin(totalTime*10+b.phase)*0.6;
+    b.lWing.rotation.y=flap;b.rWing.rotation.y=-flap;
+  });
+  scene.children.forEach(obj=>{if(obj.userData.isFountainDrop)obj.position.y=2.2+Math.sin(totalTime*4+obj.userData.fountainPhase*Math.PI*2)*0.15;});
+  fountainSounds.forEach(fs=>{const dx=camera.position.x-fs.x,dz=camera.position.z-fs.z;fs.gain.gain.value=Math.max(0,0.10-Math.sqrt(dx*dx+dz*dz)*0.012);});
+  animBlimp();
+  updateAnimals(delta, totalTime);
+  updateRocket(delta, totalTime);
+
+  nearDoor=null;let closestDoor=3.5;
+  doors.forEach(d=>{const dx=camera.position.x-d.pos.x,dz=camera.position.z-d.pos.z;const dist=Math.sqrt(dx*dx+dz*dz);if(dist<closestDoor){closestDoor=dist;nearDoor=d;}});
+  nearBench=null;let closestBench=2.5;
+  benchSeats.forEach(b=>{const dx=camera.position.x-b.pos.x,dz=camera.position.z-b.pos.z;const dist=Math.sqrt(dx*dx+dz*dz);if(dist<closestBench){closestBench=dist;nearBench=b;}});
+  nearTee=null;let closestTee=3.2;
+  golfHoles.forEach((h,i)=>{const dx=camera.position.x-h.tee.x,dz=camera.position.z-h.tee.z;const dist=Math.sqrt(dx*dx+dz*dz);if(dist<closestTee){closestTee=dist;nearTee=i;}});
+
+  // Pot of gold proximity
+  {const dx=camera.position.x-window.POT_X,dz=camera.position.z-window.POT_Z;
+   nearPot=Math.sqrt(dx*dx+dz*dz)<3.2&&!hasCoin;}
+
+  // Fountain proximity
+  nearFountain=false;
+  fountainSounds.forEach(fs=>{
+    const dx=camera.position.x-fs.x,dz=camera.position.z-fs.z;
+    if(Math.sqrt(dx*dx+dz*dz)<3.5) nearFountain=true;
+  });
+
+  // Claude proximity + bubble
+  {const dx=camera.position.x-(-10), dz=camera.position.z-(-3.5);
+   const dist=Math.sqrt(dx*dx+dz*dz);
+   nearClaude = dist < 3.5;
+   if(window.claudeGroup){
+     window.claudeGroup.position.y=Math.sin(totalTime*1.2)*0.06;
+     if(window.claudeUmbrella) window.claudeUmbrella.rotation.y=totalTime*0.4;
+     if(window.claudeBubble){
+       if(nearClaude&&!inRoom){
+         const wp=new THREE.Vector3(-10,2.4,-3.5);
+         const proj=wp.clone().project(camera);
+         const sx=(proj.x*0.5+0.5)*window.innerWidth;
+         const sy=(-proj.y*0.5+0.5)*window.innerHeight;
+         if(proj.z<1){
+           window.claudeBubble.style.left=sx+'px';
+           window.claudeBubble.style.top=(sy-8)+'px';
+           window.claudeBubble.style.display='block';
+         } else window.claudeBubble.style.display='none';
+       } else window.claudeBubble.style.display='none';
+     }
+   }
+  }
+
+  // Rainbow message countdown + cooldown
+  if(wishCooldown>0) wishCooldown-=delta;
+  if(rainbowMsgTimer>0){
+    rainbowMsgTimer-=delta;
+    rainbowTextTimer+=delta;
+    animateRainbowText();
+    if(rainbowMsgTimer<=0) rainbowMsg.style.display='none';
+  }
+
+  // Slide proximity — at top of tower
+  {const dx=camera.position.x-SLIDE_X, dz=camera.position.z-SLIDE_Z;
+   nearSlide = Math.sqrt(dx*dx+dz*dz)<4.0 && camera.position.y>20;}
+
+  // Nearest other player for E key interaction
+  nearestPlayerId=null; let closestPlayer=4.0;
+  if(!golfMode){ // don't show player interaction during golf
+    Object.entries(otherPlayers).forEach(([sid,p])=>{
+      const dx=camera.position.x-p.group.position.x;
+      const dz=camera.position.z-p.group.position.z;
+      const d=Math.sqrt(dx*dx+dz*dz);
+      if(d<closestPlayer){closestPlayer=d;nearestPlayerId=sid;}
     });
-    if(!matchSid) return;
-    const p=otherPlayers[matchSid];
-    if(!p) return;
+  }
+
+  if(!isSitting&&!golfMode){
+    if(nearSlide&&!slideMode)        {doorPrompt.textContent='🌊 Press E to RIDE! 🌊';doorPrompt.style.display='block';}
+    else if(nearPoker)               {doorPrompt.textContent='Press E to play poker 🃏';doorPrompt.style.display='block';}
+    else if(nearLadder&&!nearSlide)  {doorPrompt.textContent='Push joystick forward or tap ⬆ to climb';doorPrompt.style.display='block';}
+    else if(nearPot&&!hasCoin)       {doorPrompt.textContent='Press E to pick up a coin 🪙';doorPrompt.style.display='block';}
+    else if(nearFountain&&hasCoin)   {doorPrompt.textContent='Press E to toss coin & make a wish ✨';doorPrompt.style.display='block';}
+    else if(nearFountain&&!hasCoin)  {doorPrompt.textContent='Press E to approach the fountain';doorPrompt.style.display='block';}
+    else if(nearCosmeticShop)       {doorPrompt.textContent='Press E for Boutique ✨';doorPrompt.style.display='block';}
+    else if(nearPetShop)            {doorPrompt.textContent='Press E for Pet Shop 🐾';doorPrompt.style.display='block';}
+    else if(nearLeaderboard)          {doorPrompt.textContent='Press E to view leaderboard 🏆';doorPrompt.style.display='block';}
+    else if(nearSlotMachine)         {doorPrompt.textContent='Press E to play slots 🎰';doorPrompt.style.display='block';}
+    else if(nearRaffleVendor)        {doorPrompt.textContent='Press E to buy raffle ticket 🎫';doorPrompt.style.display='block';}
+    else if(nearHost)                {doorPrompt.textContent='Press E to be seated 🎩';doorPrompt.style.display='block';}
+    else if(nearClaude)              {doorPrompt.textContent='Press E to talk to Claude 🐙';doorPrompt.style.display='block';}
+    else if(nearDoor)                {doorPrompt.textContent='Press E or tap to enter '+nearDoor.label;doorPrompt.style.display='block';}
+    else if(nearBench)               {doorPrompt.textContent='Press E or tap to sit';doorPrompt.style.display='block';}
+    else if(nearTee!==null&&!mpGolf.active) {doorPrompt.textContent='Press E to play Hole '+(nearTee+1);doorPrompt.style.display='block';}
+    else if(nearestPlayerId)         {doorPrompt.textContent='Press E to interact with player 👤';doorPrompt.style.display='block';}
+    else                             {doorPrompt.style.display='none';}
+  }
+  // ── MULTIPLAYER UPDATES ──
+  if(socket&&mySocketId){
+    posUpdateTimer+=delta;
+    if(posUpdateTimer>0.05){ sendPosition(); posUpdateTimer=0; }
+
+  }
+  if(myChatTimer>0){ myChatTimer-=delta; if(myChatTimer<=0) myChatBubble.style.display='none'; }
+  updateRemotePlayers(delta, totalTime);
+  updateRobots(delta, totalTime);
+  updateLounge(delta, totalTime);
+  updatePet(delta, totalTime);
+  updateNimbus(delta, totalTime);
+  updateSlotProximity();
+  // Cosmetic shop proximity
+  const csx=camera.position.x-(CSHOP_X-5.5), csz=camera.position.z-CSHOP_Z;
+  nearCosmeticShop=Math.sqrt(csx*csx+csz*csz)<3;
+  updateVoiceConnections(delta);
+  updateVoiceVolumes();
+  if(mpGolf.active) updateMpBallMarkers();
+  updateGolferFigure();
+  updateGolfTouchHint();
+  // Near poker table
+  {const pdx=camera.position.x-(-16),pdz=camera.position.z-(-28);
+   nearPoker=Math.sqrt(pdx*pdx+pdz*pdz)<4;}
+}
+
+window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);});
+
+// ─── TERMS OF SERVICE ─────────────────────────────────────
+const tosAccepted = localStorage.getItem('aplabs_tos_v1') === 'yes';
+const tosOverlay = document.createElement('div');
+tosOverlay.style.cssText=`position:fixed;inset:0;background:rgba(0,5,15,0.98);
+  color:white;font-family:'Segoe UI',sans-serif;z-index:600;
+  display:${tosAccepted?'none':'flex'};align-items:center;justify-content:center;`;
+tosOverlay.innerHTML=`
+  <div style="max-width:520px;padding:32px 28px;display:flex;flex-direction:column;height:90vh;box-sizing:border-box;">
+    <div style="text-align:center;margin-bottom:20px;">
+      <div style="font-size:2rem;font-weight:bold;">Astropelion Labs</div>
+      <div style="opacity:0.5;font-size:0.85rem;margin-top:4px;">Community Standards & Terms of Use</div>
+    </div>
+    <div id="tosBody" style="flex:1;overflow-y:auto;background:rgba(255,255,255,0.04);
+      border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:20px;
+      font-size:0.88rem;line-height:1.8;margin-bottom:16px;">
+      <p style="color:#44FF88;font-weight:bold;margin-top:0;">Welcome. This is a place built for fun, creativity, and good vibes.</p>
+      <p>By entering, you agree to the following:</p>
+      <p><strong>🤝 Be Kind</strong><br>
+      Treat every person you meet here with basic human decency. Disagreements happen — cruelty doesn't have to. This world is for everyone.</p>
+      <p><strong>🚫 Zero Tolerance</strong><br>
+      The following will result in an immediate and permanent ban with no appeal:<br>
+      • Hate speech, racism, bigotry, or targeted harassment of any kind<br>
+      • Threats of violence or real-world harm<br>
+      • Sexual content of any kind directed at or involving minors — this will be reported to authorities<br>
+      • Soliciting personal information (age, location, contact details) from other users<br>
+      • Impersonation of real people with intent to deceive or harm</p>
+      <p><strong>💬 Language</strong><br>
+      Casual language is fine. We auto-filter extreme profanity. But "filtered" doesn't mean "encouraged" — keep it fun, not foul.</p>
+      <p><strong>🔒 Your Privacy</strong><br>
+      Do not share your real name, address, phone number, school, workplace, or any identifying information in public chat. Protect yourself.</p>
+      <p><strong>📵 No Soliciting</strong><br>
+      This is not a place to advertise, recruit, sell, or promote anything. Keep it genuine.</p>
+      <p><strong>🎮 It's a Game</strong><br>
+      Have fun. Explore. Play golf. Make wishes. Ride the slide. Talk to the octopus. That's what this is for.</p>
+      <p><strong>⚖️ Enforcement</strong><br>
+      Violations are handled by automated systems and manual review. Bans are issued at our sole discretion. There is no formal appeals process for severe violations.</p>
+      <p style="opacity:0.5;font-size:0.8rem;margin-bottom:0;">By clicking "I Agree" you confirm you have read these terms, are at least 13 years of age, and agree to abide by them.</p>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+      <input type="checkbox" id="tosCheck" style="width:18px;height:18px;cursor:pointer;accent-color:#FF7A45;">
+      <label for="tosCheck" style="font-size:0.88rem;cursor:pointer;opacity:0.8;">
+        I have read and agree to the Community Standards above
+      </label>
+    </div>
+    <button id="tosAgreeBtn" disabled
+      style="background:#555;color:rgba(255,255,255,0.4);border:none;border-radius:12px;
+      padding:14px;font-size:16px;font-weight:bold;cursor:not-allowed;transition:all 0.2s;">
+      I Agree — Enter the World
+    </button>
+  </div>
+`;
+document.body.appendChild(tosOverlay);
+
+setTimeout(()=>{
+  const tosCheck=document.getElementById('tosCheck');
+  const tosBtn=document.getElementById('tosAgreeBtn');
+  const tosBody=document.getElementById('tosBody');
+  if(!tosCheck||!tosBtn) return;
+  tosCheck.addEventListener('change',()=>{
+    if(tosCheck.checked){
+      tosBtn.disabled=false;
+      tosBtn.style.background='#FF7A45';
+      tosBtn.style.color='white';
+      tosBtn.style.cursor='pointer';
+    } else {
+      tosBtn.disabled=true;
+      tosBtn.style.background='#555';
+      tosBtn.style.color='rgba(255,255,255,0.4)';
+      tosBtn.style.cursor='not-allowed';
+    }
+  });
+  tosBtn.addEventListener('click',()=>{
+    if(!tosCheck.checked) return;
+    localStorage.setItem('aplabs_tos_v1','yes');
+    tosOverlay.style.display='none';
+  });
+  // Scroll hint — button stays disabled until checkbox checked (no forced scroll)
+},100);
+// Auto-detect: localhost uses local server, everything else uses Railway
+const SERVER_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'http://localhost:3001'
+  : 'https://aplabs-server-production.up.railway.app';
+let socket = null;
+let mySocketId = null;
+Object.defineProperty(window,'_mySocketId',{get:()=>mySocketId});
+let myUsername = '';
+let myAnimal = 'cow';
+let myHat = 'none';
+let myShirtColor = '#FF4488';
+const otherPlayers = {}; // socketId -> { group, label, chatBubble, ... }
+let lastSentX=0, lastSentZ=0, lastSentRotY=0, lastSentY=0, posUpdateTimer=0;
+
+// ── AVATAR COLORS ──
+const ANIMAL_BODY_COLORS = {cow:0xF5F0E8,pig:0xFFB5C8,duck:0xFFDD44,rabbit:0xE8E0D8,chicken:0xFF8844};
+const ANIMAL_ACCENT_COLORS = {cow:0x222222,pig:0xFF8899,duck:0xFF6600,rabbit:0xFFAAAA,chicken:0xFF4400};
+const HAT_DATA = {
+  none: null,
+  cowboy: {color:0x8B6914, shape:'cowboy'},
+  tophat: {color:0x111111, shape:'cylinder'},
+  crown:  {color:0xFFD700, shape:'crown'},
+  party:  {color:0xFF44AA, shape:'cone'},
+  cap:    {color:0x2244CC, shape:'cap'},
+};
+
+function buildPlayerMesh(animal, hat, shirtColor) {
+  const g = new THREE.Group();
+  const bc = ANIMAL_BODY_COLORS[animal] || 0xFFAAAA;
+  const ac = ANIMAL_ACCENT_COLORS[animal] || 0xFF6600;
+  const bMat = new THREE.MeshLambertMaterial({color:bc});
+  const aMat = new THREE.MeshLambertMaterial({color:ac});
+  const shirtMat = new THREE.MeshLambertMaterial({color:parseInt(shirtColor.replace('#','0x'))});
+
+  // Body (shirt colored)
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.55,0.6,0.4), shirtMat);
+  body.position.y=0.72; g.add(body);
+  // Head
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.48,0.45,0.42), bMat);
+  head.position.set(0,1.25,0.04); g.add(head);
+  // Eyes
+  [-0.12,0.12].forEach(ex=>{
+    const eye=new THREE.Mesh(new THREE.BoxGeometry(0.07,0.07,0.05),new THREE.MeshBasicMaterial({color:0x111111}));
+    eye.position.set(ex,1.28,0.22); g.add(eye);
+  });
+  // Animal features
+  if(animal==='cow'){
+    [-0.16,0.16].forEach(hx=>{
+      const horn=new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.05,0.2,4),aMat);
+      horn.position.set(hx,1.52,0); g.add(horn);
+    });
+    // Sunglasses
+    [-0.13,0.13].forEach(gx=>{
+      const lens=new THREE.Mesh(new THREE.BoxGeometry(0.14,0.09,0.04),new THREE.MeshBasicMaterial({color:0x111133,transparent:true,opacity:0.85}));
+      lens.position.set(gx,1.3,0.23); g.add(lens);
+    });
+  }
+  if(animal==='rabbit'){
+    [-0.13,0.13].forEach(ex=>{
+      const ear=new THREE.Mesh(new THREE.BoxGeometry(0.1,0.35,0.08),bMat);
+      ear.position.set(ex,1.58,0); g.add(ear);
+    });
+  }
+  if(animal==='pig'||animal==='cow'){
+    const snout=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.14,0.08),aMat);
+    snout.position.set(0,1.16,0.24); g.add(snout);
+  }
+  if(animal==='duck'||animal==='chicken'){
+    const beak=new THREE.Mesh(new THREE.BoxGeometry(0.16,0.1,0.14),aMat);
+    beak.position.set(0,1.18,0.28); g.add(beak);
+  }
+  if(animal==='chicken'){
+    const comb=new THREE.Mesh(new THREE.BoxGeometry(0.12,0.14,0.08),aMat);
+    comb.position.set(0,1.52,0.04); g.add(comb);
+  }
+  // Arms
+  [-0.35,0.35].forEach(ax=>{
+    const arm=new THREE.Mesh(new THREE.BoxGeometry(0.14,0.38,0.14),bMat);
+    arm.position.set(ax,0.72,0); g.add(arm);
+  });
+  // Legs
+  [-0.16,0.16].forEach(lx=>{
+    const leg=new THREE.Mesh(new THREE.BoxGeometry(0.16,0.38,0.16),aMat);
+    leg.position.set(lx,0.22,0); g.add(leg);
+  });
+
+  // Hat
+  if(hat && hat !== 'none') {
+    const hd = HAT_DATA[hat];
+    if(hd) {
+      const hatMat = new THREE.MeshLambertMaterial({color:hd.color});
+      if(hd.shape==='cowboy'){
+        const brim=new THREE.Mesh(new THREE.CylinderGeometry(0.45,0.45,0.06,12),hatMat);
+        brim.position.set(0,1.52,0); g.add(brim);
+        const top=new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.26,0.38,12),hatMat);
+        top.position.set(0,1.72,0); g.add(top);
+      } else if(hd.shape==='cylinder'){
+        const top=new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.22,0.55,12),hatMat);
+        top.position.set(0,1.78,0); g.add(top);
+        const brim=new THREE.Mesh(new THREE.CylinderGeometry(0.34,0.34,0.05,12),hatMat);
+        brim.position.set(0,1.52,0); g.add(brim);
+      } else if(hd.shape==='crown'){
+        const base=new THREE.Mesh(new THREE.CylinderGeometry(0.28,0.28,0.22,12),hatMat);
+        base.position.set(0,1.58,0); g.add(base);
+        [0,1,2,3,4].forEach(i=>{
+          const spike=new THREE.Mesh(new THREE.ConeGeometry(0.06,0.22,4),hatMat);
+          const a=(i/5)*Math.PI*2;
+          spike.position.set(Math.cos(a)*0.2,1.82,Math.sin(a)*0.2); g.add(spike);
+        });
+      } else if(hd.shape==='cone'){
+        const cone2=new THREE.Mesh(new THREE.ConeGeometry(0.22,0.5,8),hatMat);
+        cone2.position.set(0,1.78,0); g.add(cone2);
+        // Party stripes
+        const stripeMat=new THREE.MeshBasicMaterial({color:0xFFFF00});
+        const stripe=new THREE.Mesh(new THREE.TorusGeometry(0.16,0.02,4,12),stripeMat);
+        stripe.position.set(0,1.63,0); g.add(stripe);
+      } else if(hd.shape==='cap'){
+        const dome=new THREE.Mesh(new THREE.SphereGeometry(0.26,8,6,0,Math.PI*2,0,Math.PI/2),hatMat);
+        dome.position.set(0,1.53,0); g.add(dome);
+        const brim2=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.06,0.26),hatMat);
+        brim2.position.set(0,1.5,0.22); g.add(brim2);
+      }
+    }
+  }
+  return g;
+}
+
+// Name tag floating above player
+function makeNameTag(username, animal) {
+  const el = document.createElement('div');
+  el.style.cssText = `position:fixed;background:rgba(0,0,0,0.65);color:white;
+    font-family:sans-serif;font-size:12px;font-weight:bold;padding:3px 10px;
+    border-radius:10px;pointer-events:none;display:none;z-index:120;
+    transform:translate(-50%,-100%);white-space:nowrap;`;
+  el.textContent = username;
+  document.body.appendChild(el);
+  return el;
+}
+
+function makeRemoteChatBubble() {
+  const el = document.createElement('div');
+  el.style.cssText = `position:fixed;background:white;color:#222;font-family:sans-serif;
+    font-size:12px;padding:5px 10px;border-radius:14px;pointer-events:none;
+    display:none;z-index:121;transform:translate(-50%,-100%);
+    box-shadow:0 2px 6px rgba(0,0,0,0.2);white-space:nowrap;max-width:200px;white-space:normal;`;
+  document.body.appendChild(el);
+  return el;
+}
+
+function addRemotePlayer(data) {
+  if (otherPlayers[data.socketId]) return;
+  const group = buildPlayerMesh(data.animal, data.hat, data.shirtColor || '#FF4488');
+  group.position.set(data.x||0, (data.y||GROUND_Y) - GROUND_Y, data.z||0);
+  scene.add(group);
+  const nameTag = makeNameTag(data.username, data.animal);
+  const chatBubble = makeRemoteChatBubble();
+  chatBubble.timer = 0;
+  otherPlayers[data.socketId] = { group, nameTag, chatBubble, data, legPhase:0, walking:false };
+}
+
+function removeRemotePlayer(socketId) {
+  const p = otherPlayers[socketId];
+  if (!p) return;
+  scene.remove(p.group);
+  p.nameTag.remove();
+  p.chatBubble.remove();
+  delete otherPlayers[socketId];
+}
+
+function projectToScreen(worldPos) {
+  const v = worldPos.clone().project(camera);
+  return {
+    x: (v.x*0.5+0.5)*window.innerWidth,
+    y: (-v.y*0.5+0.5)*window.innerHeight,
+    visible: v.z < 1
+  };
+}
+
+function updateRemotePlayers(delta, totalTime) {
+  Object.values(otherPlayers).forEach(p => {
+    p.legPhase += delta*6;
+    const legs = p.group.children.filter((_,i)=>i===8||i===9);
+    legs.forEach((l,i)=>{ if(l) l.rotation.x = Math.sin(p.legPhase+(i*Math.PI))*0.3; });
+
+    // Distance check — hide nametag beyond 30 units
     const dx=camera.position.x-p.group.position.x;
     const dz=camera.position.z-p.group.position.z;
     const dist=Math.sqrt(dx*dx+dz*dz);
-    const vol=dist>VOICE_RANGE?0:dist<VOICE_FALLOFF?1:1-(dist-VOICE_FALLOFF)/(VOICE_RANGE-VOICE_FALLOFF);
-    participant.setVolume(vol);
+    const wp = p.group.position.clone().add(new THREE.Vector3(0,2.2,0));
+    const s = projectToScreen(wp);
+    if(s.visible && dist < 30) {
+      p.nameTag.style.left=s.x+'px'; p.nameTag.style.top=(s.y-2)+'px';
+      p.nameTag.style.display='block';
+      // Fade out between 20-30 units
+      p.nameTag.style.opacity = dist < 20 ? '1' : String(1-(dist-20)/10);
+    } else { p.nameTag.style.display='none'; }
+
+    // Chat bubble
+    if(p.chatBubble.timer > 0) {
+      p.chatBubble.timer -= delta;
+      const cs = projectToScreen(p.group.position.clone().add(new THREE.Vector3(0,2.8,0)));
+      if(cs.visible && dist < 30) {
+        p.chatBubble.style.left=cs.x+'px'; p.chatBubble.style.top=(cs.y-2)+'px';
+        p.chatBubble.style.display='block';
+        p.chatBubble.style.opacity=Math.min(1,p.chatBubble.timer);
+      } else p.chatBubble.style.display='none';
+      if(p.chatBubble.timer<=0) p.chatBubble.style.display='none';
+    }
+
+    // Tag indicator above head
+    if(tagGame.active && tagGame.itId === p.data.socketId) {
+      p.nameTag.textContent = '🏃 ' + p.data.username + ' [IT]';
+      p.nameTag.style.background='rgba(255,60,0,0.85)';
+    } else if(tagGame.active && tagGame.itId === mySocketId) {
+      p.nameTag.textContent = p.data.username;
+      p.nameTag.style.background='rgba(0,0,0,0.65)';
+    } else {
+      p.nameTag.textContent = p.data.username;
+      p.nameTag.style.background='rgba(0,0,0,0.65)';
+    }
   });
 }
 
+// Send position if moved enough
+function sendPosition() {
+  if (!socket || !mySocketId) return;
+  const dx=camera.position.x-lastSentX, dz=camera.position.z-lastSentZ;
+  const dy=Math.abs(camera.position.y-lastSentY);
+  const dyaw=Math.abs(yaw-lastSentRotY);
+  if(Math.sqrt(dx*dx+dz*dz)>0.05||dyaw>0.04||dy>0.05){
+    socket.emit('player:move',{x:camera.position.x,y:camera.position.y,z:camera.position.z,rotY:yaw});
+    lastSentX=camera.position.x; lastSentZ=camera.position.z;
+    lastSentRotY=yaw; lastSentY=camera.position.y;
+  }
+}
+
+// ── TEXT CHAT UI ──
+const chatBox = document.createElement('div');
+chatBox.style.cssText=`position:fixed;bottom:310px;left:50%;transform:translateX(-50%);
+  display:none;z-index:200;`;
+chatBox.innerHTML=`
+  <div style="display:flex;gap:6px;align-items:center;">
+    <input id="chatInput" maxlength="80" placeholder="Say something..."
+      style="background:rgba(0,0,0,0.82);border:1px solid rgba(255,255,255,0.3);
+      color:white;font-family:sans-serif;font-size:15px;padding:11px 14px;
+      border-radius:12px;width:220px;outline:none;"
+      enterkeyhint="send"
+    />
+    <button id="chatSendBtn"
+      style="background:#FF7A45;color:white;border:none;border-radius:12px;
+      padding:11px 16px;font-size:15px;font-weight:bold;cursor:pointer;
+      white-space:nowrap;min-width:56px;">Send</button>
+  </div>
+`;
+document.body.appendChild(chatBox);
+let chatOpen=false;
+
+function sendChatMsg(){
+  const input=document.getElementById('chatInput');
+  if(!input||!input.value.trim()) return;
+  const msg=input.value.trim();
+  if(socket&&mySocketId) socket.emit('player:chat', msg);
+  input.value='';
+  chatOpen=false; chatBox.style.display='none';
+}
+
+setTimeout(()=>{
+  document.getElementById('chatSendBtn')?.addEventListener('click', sendChatMsg);
+  document.getElementById('chatSendBtn')?.addEventListener('touchend', e=>{
+    e.preventDefault(); sendChatMsg();
+  },{passive:false});
+  // Mobile enter key
+  document.getElementById('chatInput')?.addEventListener('keydown', e=>{
+    if(e.key==='Enter'){ e.preventDefault(); sendChatMsg(); }
+  });
+},100);
+
+document.addEventListener('keydown',e=>{
+  if(e.code==='KeyT'&&!inRoom&&!golfMode&&!slideMode&&socket&&mySocketId){
+    // Don't toggle if user is actively typing in the input
+    if(document.activeElement===document.getElementById('chatInput')) return;
+    chatOpen=!chatOpen;
+    chatBox.style.display=chatOpen?'block':'none';
+    if(chatOpen) setTimeout(()=>document.getElementById('chatInput')?.focus(),50);
+  }
+});
+
+// My own chat bubble
+const myChatBubble=document.createElement('div');
+myChatBubble.style.cssText=`position:fixed;bottom:180px;left:50%;transform:translateX(-50%);
+  background:white;color:#222;font-family:sans-serif;font-size:13px;font-weight:bold;
+  padding:7px 14px;border-radius:16px;display:none;z-index:120;
+  box-shadow:0 2px 8px rgba(0,0,0,0.2);max-width:220px;text-align:center;`;
+document.body.appendChild(myChatBubble);
+let myChatTimer=0;
+
+// ── JOIN OVERLAY ──
+const joinOverlay=document.createElement('div');
+joinOverlay.style.cssText=`position:fixed;inset:0;background:rgba(0,10,30,0.96);
+  color:white;font-family:'Segoe UI',sans-serif;z-index:400;
+  display:flex;align-items:center;justify-content:center;flex-direction:column;`;
+
+const ANIMALS=['cow','pig','duck','rabbit','chicken'];
+const HATS=['none','cowboy','tophat','crown','party','cap'];
+const SHIRT_COLORS=['#FF4488','#4488FF','#44FF88','#FFAA22','#CC44FF','#FF4422','#22CCFF'];
+
+joinOverlay.innerHTML=`
+  <div style="max-width:460px;padding:32px 28px;text-align:center;">
+    <div style="font-size:2.2rem;font-weight:bold;margin-bottom:6px;">Welcome to Astropelion Labs</div>
+    <div style="opacity:0.6;font-size:1rem;margin-bottom:4px;color:#FF7A45;">Forefront of the Future.</div>
+    <div style="opacity:0.4;font-size:0.85rem;margin-bottom:24px;">Pick your look, then explore</div>
+    <div style="margin-bottom:18px;">
+      <input id="usernameInput" maxlength="20" placeholder="Your name..."
+        style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.25);
+        color:white;font-size:16px;padding:11px 16px;border-radius:10px;width:100%;
+        box-sizing:border-box;outline:none;font-family:inherit;">
+    </div>
+    <div style="margin-bottom:18px;">
+      <input id="passwordInput" type="password" maxlength="30" placeholder="Password (optional — saves your chips)"
+        style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.25);
+        color:white;font-size:14px;padding:11px 16px;border-radius:10px;width:100%;
+        box-sizing:border-box;outline:none;font-family:inherit;opacity:0.8;">
+    </div>
+    <div style="margin-bottom:14px;text-align:left;font-size:0.85rem;opacity:0.6;">Choose your animal</div>
+    <div style="display:flex;gap:8px;margin-bottom:18px;justify-content:center;" id="animalPicker">
+      ${ANIMALS.map(a=>`<div class="animalBtn" data-animal="${a}"
+        style="background:rgba(255,255,255,0.08);border:2px solid transparent;border-radius:10px;
+        padding:8px 12px;cursor:pointer;font-size:13px;transition:all 0.15s;">${a}</div>`).join('')}
+    </div>
+    <div style="margin-bottom:14px;text-align:left;font-size:0.85rem;opacity:0.6;">Hat</div>
+    <div style="display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap;justify-content:center;" id="hatPicker">
+      ${HATS.map(h=>`<div class="hatBtn" data-hat="${h}"
+        style="background:rgba(255,255,255,0.08);border:2px solid transparent;border-radius:8px;
+        padding:6px 10px;cursor:pointer;font-size:12px;">${h}</div>`).join('')}
+    </div>
+    <div style="margin-bottom:14px;text-align:left;font-size:0.85rem;opacity:0.6;">Shirt color</div>
+    <div style="display:flex;gap:8px;margin-bottom:24px;justify-content:center;" id="colorPicker">
+      ${SHIRT_COLORS.map(c=>`<div class="colorBtn" data-color="${c}"
+        style="width:32px;height:32px;border-radius:50%;background:${c};cursor:pointer;
+        border:2px solid transparent;"></div>`).join('')}
+    </div>
+    <button id="joinBtn" style="background:#FF7A45;color:white;border:none;border-radius:12px;
+      padding:14px 40px;font-size:16px;font-weight:bold;cursor:pointer;width:100%;">
+      Enter the World
+    </button>
+    <div style="margin-top:12px;opacity:0.35;font-size:0.78rem;">Press T to chat · E to interact</div>
+  </div>
+`;
+document.body.appendChild(joinOverlay);
+
+// Picker interaction
+let selectedAnimal='cow', selectedHat='none', selectedColor=SHIRT_COLORS[0];
+
+setTimeout(()=>{
+  const highlight=(selector,attr,val)=>{
+    document.querySelectorAll(selector).forEach(el=>{
+      const isColor=selector==='.colorBtn';
+      el.style.borderColor=el.dataset[attr]===val?'#FF7A45':'transparent';
+      if(!isColor) el.style.background=el.dataset[attr]===val?'rgba(255,122,69,0.2)':'rgba(255,255,255,0.08)';
+      el.style.transform=el.dataset[attr]===val?(isColor?'scale(1.25)':''):'';
+      el.style.boxShadow=el.dataset[attr]===val&&isColor?'0 0 0 3px #FF7A45':'none';
+    });
+  };
+  document.querySelectorAll('.animalBtn').forEach(btn=>{
+    btn.addEventListener('click',()=>{ selectedAnimal=btn.dataset.animal; highlight('.animalBtn','animal',selectedAnimal); });
+  });
+  document.querySelectorAll('.hatBtn').forEach(btn=>{
+    btn.addEventListener('click',()=>{ selectedHat=btn.dataset.hat; highlight('.hatBtn','hat',selectedHat); });
+  });
+  document.querySelectorAll('.colorBtn').forEach(btn=>{
+    btn.addEventListener('click',()=>{ selectedColor=btn.dataset.color; highlight('.colorBtn','color',selectedColor); });
+  });
+  highlight('.animalBtn','animal','cow');
+  highlight('.hatBtn','hat','none');
+  highlight('.colorBtn','color',selectedColor);
+
+  document.getElementById('joinBtn').addEventListener('click',()=>{
+    const name=(document.getElementById('usernameInput').value.trim()||'Visitor').substring(0,20);
+    const pass=(document.getElementById('passwordInput')?.value.trim()||'');
+    myUsername=name; myAnimal=selectedAnimal; myHat=selectedHat; myShirtColor=selectedColor;
+    loadFriends(); // load this user's friends after username is known
+    joinOverlay.style.display='none';
+    connectMultiplayer(pass);
+  });
+  document.getElementById('usernameInput').addEventListener('keydown',e=>{
+    if(e.key==='Enter') document.getElementById('joinBtn').click();
+  });
+},100);
+
+function connectMultiplayer(password=''){
+  if(!ioLoaded || typeof io === 'undefined'){
+    showNotification('Playing offline — multiplayer unavailable');
+    return;
+  }
   try {
+    socket = io(SERVER_URL, { transports:['polling','websocket'], reconnectionAttempts:10, reconnectionDelay:2000 });
+
+    socket.on('connect',()=>{
+      mySocketId=socket.id;
+      socket.emit('player:join',{ username:myUsername, animal:myAnimal, hat:myHat, shirtColor:myShirtColor, password });
+      showNotification(`Connected as ${myUsername} 🎉`);
+    });
+
+    socket.on('chips:update',(data)=>{
+      const prev=window.myChips||1000;
+      window.myChips=data.chips;
+      const diff=data.chips-prev;
+      if(diff!==0){
+        const walletEl=document.getElementById('walletAmount');
+        if(walletEl){
+          walletEl.textContent=data.chips.toLocaleString();
+          walletEl.style.animation='none';
+          walletEl.style.color=diff>0?'#88FF44':'#FF6644';
+          setTimeout(()=>{ walletEl.style.animation='flashPop 0.4s ease-out'; walletEl.style.color='#FFD700'; },50);
+        }
+        showNotification(diff>0?`💰 +${diff} SpaceBucks!`:`💸 ${diff} SpaceBucks`);
+      }
+    });
+
+    socket.on('coins:received',(data)=>{
+      window.myChips=(window.myChips||0)+data.amount;
+      const walletEl=document.getElementById('walletAmount');
+      if(walletEl){ walletEl.textContent=window.myChips.toLocaleString(); walletEl.style.color='#88FF44'; setTimeout(()=>walletEl.style.color='#FFD700',1500); }
+      const ann=document.createElement('div');
+      ann.style.cssText=`position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+        background:rgba(20,20,0,0.97);border:2px solid #FFD700;border-radius:16px;
+        padding:24px 36px;text-align:center;color:white;font-family:sans-serif;z-index:600;`;
+      ann.innerHTML=`<div style="font-size:2rem;margin-bottom:8px;">💰</div>
+        <div style="font-size:1.1rem;font-weight:bold;">${data.from} sent you</div>
+        <div style="font-size:2rem;color:#FFD700;font-weight:bold;margin:8px 0;">${data.amount.toLocaleString()} SB</div>
+        <button onclick="this.parentElement.remove()" style="margin-top:8px;background:#886600;
+          color:white;border:none;border-radius:8px;padding:8px 20px;cursor:pointer;">Nice!</button>`;
+      document.body.appendChild(ann);
+      setTimeout(()=>ann.remove(),8000);
+    });
+    socket.on('world:state',({players:ps})=>{ if(ps) window.myChips=ps.find?.(p=>p.username===myUsername)?.chips||1000; });
+
+    socket.on('connect_error',()=>{
+      showNotification('Playing offline — multiplayer unavailable');
+    });
+
+    socket.on('auth:error',(msg)=>{
+      showNotification('❌ '+msg);
+      socket.disconnect();
+      socket=null; mySocketId=null;
+      joinOverlay.style.display='flex';
+    });
+
+    socket.on('moderation:banned',(data)=>{
+      const banScreen=document.createElement('div');
+      banScreen.style.cssText=`position:fixed;inset:0;background:rgba(20,0,0,0.97);
+        color:white;font-family:sans-serif;display:flex;align-items:center;
+        justify-content:center;z-index:9999;text-align:center;`;
+      banScreen.innerHTML=`
+        <div style="max-width:420px;padding:32px;">
+          <div style="font-size:3rem;margin-bottom:16px;">🚫</div>
+          <h2 style="color:#FF4444;margin-bottom:12px;">You've been removed</h2>
+          <p style="opacity:0.75;line-height:1.8;margin-bottom:20px;">${data.reason}</p>
+          <p style="opacity:0.4;font-size:0.8rem;">If you believe this was in error, please review the Community Standards.</p>
+        </div>`;
+      document.body.appendChild(banScreen);
+      if(socket){socket.disconnect();socket=null;mySocketId=null;}
+    });
+
+    socket.on('world:state',({players})=>{
+      players.forEach(p=>addRemotePlayer(p));
+    });
+
+    socket.on('player:joined',(data)=>{
+      addRemotePlayer(data);
+      showNotification(`${data.username} joined as ${data.animal}!`);
+    });
+
+    socket.on('player:moved',(data)=>{
+      const p=otherPlayers[data.socketId];
+      if(!p) return;
+      const prevY = p.group.position.y;
+      p.group.position.set(data.x, data.y - GROUND_Y, data.z);
+      p.group.rotation.y=data.rotY+Math.PI;
+      // If sliding: arms out, tilt body down the slope
+      if(data.sliding){
+        p.isSliding=true;
+        const dy = p.group.position.y - prevY;
+        p.group.rotation.x = Math.max(-0.6, Math.min(0.6, -dy*2));
+        // Spread arms out (indices 2 and 3 are arms in buildPlayerMesh)
+        if(p.group.children[2]) p.group.children[2].rotation.z = 1.2;
+        if(p.group.children[3]) p.group.children[3].rotation.z = -1.2;
+      } else if(p.isSliding) {
+        p.isSliding=false;
+        p.group.rotation.x=0;
+        if(p.group.children[2]) p.group.children[2].rotation.z=0;
+        if(p.group.children[3]) p.group.children[3].rotation.z=0;
+      }
+    });
+
+    socket.on('player:left',(data)=>{
+      const p=otherPlayers[data.socketId];
+      if(p) showNotification(`${p.data.username} left`);
+      removeRemotePlayer(data.socketId);
+      closePeer(data.socketId); // clean up voice
+    });
+
+    // ── WebRTC Signaling ──
+    socket.on('voice:request',(data)=>{
+      console.log('[VOICE] Received voice:request from',data.from,'micActive=',micActive,'hasStream=',!!localStream);
+      if(!micActive||!localStream){
+        console.log('[VOICE] Mic not ready, storing pending request from',data.from);
+        pendingVoiceRequests.add(data.from);
+        return;
+      }
+      createPeerConnection(data.from, true);
+      socket.emit('voice:readyToConnect',{to:data.from});
+      showNotification('🎤 Voice connecting...');
+    });
+
+    socket.on('voice:readyToConnect',async(data)=>{
+      console.log('[VOICE] Received readyToConnect from',data.from);
+      if(!micActive||!localStream) return;
+      const pc=createPeerConnection(data.from, false);
+      try{
+        const offer=await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('voice:offer',{to:data.from,sdp:pc.localDescription});
+      }catch(e){ console.warn('voice offer err',e); }
+    });
+
+    socket.on('voice:offer',async(data)=>{
+      console.log('[VOICE] Received offer from',data.from);
+      if(!micActive) return;
+      const pc=peerConnections[data.from]?.pc || createPeerConnection(data.from, true);
+      try{
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        const answer=await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('voice:answer',{to:data.from,sdp:pc.localDescription});
+        showNotification('🎤 Voice connected!');
+      }catch(e){ console.warn('voice offer err',e); }
+    });
+
+    socket.on('voice:answer',async(data)=>{
+      console.log('[VOICE] Received answer from',data.from);
+      const peer=peerConnections[data.from];
+      if(!peer) return;
+      try{
+        await peer.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        showNotification('🎤 Voice active!');
+      }
+      catch(e){ console.warn('voice answer err',e); }
+    });
+
+    socket.on('voice:ice',async(data)=>{
+      const peer=peerConnections[data.from];
+      if(!peer) return;
+      try{ await peer.pc.addIceCandidate(new RTCIceCandidate(data.candidate)); }
+      catch(e){ console.warn('voice ice err',e); }
+    });
+
     socket.on('player:chatMsg',(data)=>{
       if(data.socketId===mySocketId){
         myChatBubble.textContent=data.msg;
@@ -2831,15 +4016,12 @@ function updateVoiceVolumes(){
     socket.on('poker:publicState',(state)=>{ window.pokerPublicState=state; renderPokerTable(); });
     socket.on('poker:state',(state)=>{ window.pokerPrivateState=state; renderPokerTable(); });
     socket.on('poker:handResult',(results)=>{ showHandResult(results); });
-    socket.on('poker:newHand', () => { showNotification('New hand dealt!'); });
+    socket.on('poker:newHand',()=>{ showNotification('🃏 New hand dealt!'); });
 
-} catch (e) {  // <--- This "}" closes the try block starting on line 2018
-  showNotification('Playing offline');
+  } catch(e) {
+    showNotification('Playing offline');
+  }
 }
-
-// Stub functions kept for compatibility
-function closeAllPeers(){}
-function updateVoiceConnections(){}
 
 // Notification toast
 function showNotification(msg){
