@@ -3422,10 +3422,10 @@ setTimeout(()=>{
   });
   // Scroll hint — button stays disabled until checkbox checked (no forced scroll)
 },100);
-// Auto-detect: if accessed from non-localhost, use same host with port 3001
-const SERVER_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+// Auto-detect: localhost uses local server, everything else uses Railway
+const SERVER_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
   ? 'http://localhost:3001'
-  : `http://${window.location.hostname}:3001`;
+  : 'https://aplabs-server-production.up.railway.app';
 let socket = null;
 let mySocketId = null;
 Object.defineProperty(window,'_mySocketId',{get:()=>mySocketId});
