@@ -2752,7 +2752,7 @@ function updateVoiceVolumes(){
   livekitRoom.remoteParticipants.forEach((participant)=>{
     const el=remoteAudioEls[participant.identity];
     if(!el) return;
-    const p=otherPlayers[participant.identity];
+    const p=Object.values(otherPlayers).find(pl=>pl.data.username===participant.identity);
     if(!p){ el.volume=0; return; }
     const dx=camera.position.x-p.group.position.x;
     const dz=camera.position.z-p.group.position.z;
@@ -2774,7 +2774,7 @@ function updateVoiceConnections(delta){
 async function enableMic(){
   try{
     if(!mySocketId){ showNotification('Connect to multiplayer first!'); return; }
-    const res=await fetch(`${SERVER_URL}/livekit-token?identity=${encodeURIComponent(mySocketId)}&room=aplabs-world`);
+    const res=await fetch(`${SERVER_URL}/livekit-token?username=${encodeURIComponent(myUsername)}&room=aplabs-world`);
     if(!res.ok) throw new Error('Token fetch failed: '+res.status);
     const {token}=await res.json();
 
