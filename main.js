@@ -2754,7 +2754,7 @@ function getAudioCtx(){
 
 function createPeerConnection(remoteSid,polite){
   if(peerConnections[remoteSid]) return peerConnections[remoteSid].pc;
-  const pc=new RTCPeerConnection({iceServers:ICE_SERVERS});
+  const pc=new RTCPeerConnection({iceServers:ICE_SERVERS,iceCandidatePoolSize:10,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require"});
   if(localStream) localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
   pc.onicecandidate=e=>{ if(e.candidate&&socket) socket.emit('voice:ice',{to:remoteSid,candidate:e.candidate}); };
   const audioEl=document.createElement('audio');
