@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-
+import { Room, RoomEvent, Track } from 'livekit-client';
 // Load Socket.io client — join screen works regardless of whether it loads
 let ioLoaded = false;
 const socketScript=document.createElement('script');
@@ -2695,29 +2695,23 @@ chatBtn.addEventListener('touchend',e=>{
 document.body.appendChild(chatBtn);
 
 // ── MICROPHONE BUTTON ──
-let micActive=false, micStream=null;
-let localStream=null;
-const peerConnections={}; // socketId -> {pc, gainNode, audioEl}
-const VOICE_RANGE=18, VOICE_FALLOFF=6; // units
-const ICE_SERVERS=[
-  {urls:'stun:stun.l.google.com:19302'},
-  {urls:'stun:stun1.l.google.com:19302'},
-  {urls:'turns:turn.cloudflare.com:5349', username:'free', credential:'free'},
-];
+const VOICE_RANGE = 18, VOICE_FALLOFF = 6;
+let micActive = false;
+let livekitRoom = null;
+const remoteAudioEls = {}; // participantIdentity -> HTMLAudioElement
 
-const micBtn=document.createElement('div');
-micBtn.innerHTML='🎤';
-micBtn.style.cssText=`position:fixed;bottom:236px;right:20px;width:52px;height:52px;
+const micBtn = document.createElement('div');
+micBtn.innerHTML = '🎤';
+micBtn.style.cssText = `position:fixed;bottom:236px;right:20px;width:52px;height:52px;
   background:rgba(0,0,0,0.45);border:2px solid rgba(255,255,255,0.25);border-radius:50%;
   display:flex;align-items:center;justify-content:center;font-size:22px;
   cursor:pointer;user-select:none;z-index:100;backdrop-filter:blur(6px);`;
 document.body.appendChild(micBtn);
 
-// Mic permission confirmation overlay
-const micConfirmOverlay=document.createElement('div');
-micConfirmOverlay.style.cssText=`position:fixed;inset:0;background:rgba(0,0,0,0.85);
+const micConfirmOverlay = document.createElement('div');
+micConfirmOverlay.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,0.85);
   display:none;align-items:center;justify-content:center;z-index:400;`;
-micConfirmOverlay.innerHTML=`
+micConfirmOverlay.innerHTML = `
   <div style="max-width:380px;background:rgba(20,20,30,0.98);border:1px solid rgba(255,100,100,0.4);
     border-radius:20px;padding:32px 28px;text-align:center;color:white;font-family:sans-serif;">
     <div style="font-size:3rem;margin-bottom:12px;">🎤</div>
@@ -2743,130 +2737,87 @@ micConfirmOverlay.innerHTML=`
 `;
 document.body.appendChild(micConfirmOverlay);
 
-// ── WebRTC helpers ──
-// Shared AudioContext resumed after user gesture
-let sharedAudioCtx=null;
-function getAudioCtx(){
-  if(!sharedAudioCtx||sharedAudioCtx.state==='closed') sharedAudioCtx=new AudioContext();
-  if(sharedAudioCtx.state==='suspended') sharedAudioCtx.resume();
-  return sharedAudioCtx;
+// closePeer is a no-op stub — LiveKit handles cleanup automatically
+function closePeer(sid){ /* LiveKit handles remote participant cleanup */ }
+
+function closeAllPeers(){
+  if(livekitRoom){ livekitRoom.disconnect(); livekitRoom=null; }
+  Object.values(remoteAudioEls).forEach(el=>el.remove());
+  Object.keys(remoteAudioEls).forEach(k=>delete remoteAudioEls[k]);
+  micActive=false;
 }
 
-function createPeerConnection(remoteSid,polite){
-  if(peerConnections[remoteSid]) return peerConnections[remoteSid].pc;
-  const pc=new RTCPeerConnection({iceServers:ICE_SERVERS,iceCandidatePoolSize:10,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require"});
-  if(localStream) localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
-  pc.onicecandidate=e=>{ if(e.candidate&&socket) socket.emit('voice:ice',{to:remoteSid,candidate:e.candidate}); };
-  const audioEl=document.createElement('audio');
-  audioEl.autoplay=true;
-  audioEl.style.display='none';
-  document.body.appendChild(audioEl);
-  pc.ontrack=e=>{
-    console.log('[VOICE] Got remote track from',remoteSid,'kind:',e.track.kind,'streams:',e.streams.length);
-    const stream=e.streams[0]||new MediaStream([e.track]);
-    audioEl.srcObject=stream;
-    audioEl.volume=1;
-    audioEl.play().catch(err=>console.warn('[VOICE] play() blocked:',err));
-    showNotification('🎙️ Voice connected!');
-  };
-  pc.onconnectionstatechange=()=>{ console.log('[VOICE] state:',pc.connectionState,'with',remoteSid); if(pc.connectionState==='failed'||pc.connectionState==='closed') closePeer(remoteSid); };
-  pc.oniceconnectionstatechange=()=>console.log('[VOICE] ICE:',pc.iceConnectionState,'with',remoteSid);
-  peerConnections[remoteSid]={pc,gainNode:null,audioEl,connected:false};
-  return pc;
-}
-function closePeer(sid){
-  const peer=peerConnections[sid]; if(!peer) return;
-  try{ peer.pc.close(); peer.audioEl.remove(); }catch(e){}
-  delete peerConnections[sid];
-}
-function closeAllPeers(){ Object.keys(peerConnections).forEach(closePeer); }
 function updateVoiceVolumes(){
-  if(!micActive) return;
-  Object.entries(otherPlayers).forEach(([sid,p])=>{
-    const peer=peerConnections[sid];
-    if(!peer||!peer.audioEl) return;
+  if(!micActive||!livekitRoom) return;
+  livekitRoom.remoteParticipants.forEach((participant)=>{
+    const el=remoteAudioEls[participant.identity];
+    if(!el) return;
+    const p=otherPlayers[participant.identity];
+    if(!p){ el.volume=0; return; }
     const dx=camera.position.x-p.group.position.x;
     const dz=camera.position.z-p.group.position.z;
     const dist=Math.sqrt(dx*dx+dz*dz);
     const vol=dist>VOICE_RANGE?0:dist<VOICE_FALLOFF?1:1-(dist-VOICE_FALLOFF)/(VOICE_RANGE-VOICE_FALLOFF);
-    peer.audioEl.volume=Math.max(0,Math.min(1,vol));
+    el.volume=Math.max(0,Math.min(1,vol));
   });
 }
 
-// Check which players need voice connections opened/closed
 let voiceCheckTimer=0;
 function updateVoiceConnections(delta){
-  if(!micActive||!socket||!mySocketId) return;
+  if(!micActive||!livekitRoom) return;
   voiceCheckTimer+=delta;
   if(voiceCheckTimer<1.5) return;
   voiceCheckTimer=0;
-
-  const inRange=new Set();
-  Object.entries(otherPlayers).forEach(([sid,p])=>{
-    const dx=camera.position.x-p.group.position.x;
-    const dz=camera.position.z-p.group.position.z;
-    const dist=Math.sqrt(dx*dx+dz*dz);
-    console.log(`[VOICE] Player ${sid} dist=${dist.toFixed(1)} range=${VOICE_RANGE}`);
-    if(dist<VOICE_RANGE) inRange.add(sid);
-  });
-
-  console.log(`[VOICE] inRange=${inRange.size} myId=${mySocketId} peers=${Object.keys(peerConnections).length}`);
-
-  inRange.forEach(sid=>{
-    if(!peerConnections[sid]){
-      console.log(`[VOICE] myId=${mySocketId} theirId=${sid} iInitiate=${mySocketId<sid}`);
-      if(mySocketId < sid){
-        createPeerConnection(sid, false);
-        socket.emit('voice:request',{to:sid});
-        console.log('[VOICE] Sent voice:request to',sid);
-      } else {
-        console.log('[VOICE] Waiting for them to initiate...');
-      }
-    }
-  });
-
-  Object.keys(peerConnections).forEach(sid=>{
-    if(!inRange.has(sid)) closePeer(sid);
-  });
-
   updateVoiceVolumes();
 }
 
 async function enableMic(){
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}, video:false});
+  try{
+    if(!mySocketId){ showNotification('Connect to multiplayer first!'); return; }
+    const res=await fetch(`${SERVER_URL}/livekit-token?identity=${encodeURIComponent(mySocketId)}&room=aplabs-world`);
+    if(!res.ok) throw new Error('Token fetch failed: '+res.status);
+    const {token}=await res.json();
+
+    livekitRoom=new Room();
+
+    livekitRoom.on(RoomEvent.TrackSubscribed,(track,_pub,participant)=>{
+      if(track.kind===Track.Kind.Audio){
+        const el=track.attach();
+        el.autoplay=true; el.style.display='none';
+        document.body.appendChild(el);
+        remoteAudioEls[participant.identity]=el;
+        showNotification('🎙️ Voice connected!');
+      }
+    });
+
+    livekitRoom.on(RoomEvent.TrackUnsubscribed,(track,_pub,participant)=>{
+      const el=remoteAudioEls[participant.identity];
+      if(el){ el.remove(); delete remoteAudioEls[participant.identity]; }
+    });
+
+    livekitRoom.on(RoomEvent.Disconnected,()=>{
+      micActive=false;
+      micBtn.style.background='rgba(0,0,0,0.45)';
+      micBtn.style.borderColor='rgba(255,255,255,0.25)';
+      micBtn.innerHTML='🎤';
+    });
+
+    await livekitRoom.connect('wss://aplabs-space-zefyhivd.livekit.cloud', token);
+    await livekitRoom.localParticipant.setMicrophoneEnabled(true);
+
     micActive=true;
     micBtn.style.background='rgba(180,0,0,0.7)';
     micBtn.style.borderColor='rgba(255,80,80,0.8)';
     micBtn.innerHTML='🔴';
     micBtn.title='Mic ON — tap to mute';
-    // Resume AudioContext now that we have a user gesture
-    getAudioCtx();
     showNotification('🎤 Voice on — nearby players can hear you');
-    // Add tracks to existing peer connections
-    Object.values(peerConnections).forEach(({pc})=>{
-      localStream.getTracks().forEach(t=>{ try{pc.addTrack(t,localStream);}catch(e){} });
-    });
-    // Re-scan for nearby players now that mic is live — triggers fresh initiation
-    setTimeout(()=>updateVoiceConnections(0), 500);
-    // Flush any pending requests that arrived before mic was ready
-    pendingVoiceRequests.forEach(fromId=>{
-      console.log('[VOICE] Flushing pending request from',fromId);
-      if(!peerConnections[fromId]){
-        createPeerConnection(fromId, true);
-        socket.emit('voice:readyToConnect',{to:fromId});
-      }
-    });
-    pendingVoiceRequests.clear();
-  } catch(e){
-    showNotification('Microphone access denied');
-    console.warn('Mic error:',e);
+  }catch(e){
+    showNotification('🎤 Voice failed to connect');
+    console.error('[VOICE] LiveKit error:',e);
   }
 }
 
 function disableMic(){
-  if(localStream){ localStream.getTracks().forEach(t=>t.stop()); localStream=null; }
-  micActive=false;
   closeAllPeers();
   micBtn.style.background='rgba(0,0,0,0.45)';
   micBtn.style.borderColor='rgba(255,255,255,0.25)';
@@ -2879,60 +2830,12 @@ micBtn.addEventListener('click',()=>{
   if(micActive){ disableMic(); return; }
   micConfirmOverlay.style.display='flex';
 });
-micBtn.addEventListener('touchend',e=>{e.preventDefault(); micBtn.click();},{passive:false});
+micBtn.addEventListener('touchend',e=>{ e.preventDefault(); micBtn.click(); },{passive:false});
 
 setTimeout(()=>{
-  document.getElementById('micYes')?.addEventListener('click', async ()=>{
+  document.getElementById('micYes')?.addEventListener('click',async()=>{
     micConfirmOverlay.style.display='none';
-    // getUserMedia MUST be called directly in click handler to preserve user gesture
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({
-        audio:{echoCancellation:true,noiseSuppression:true,sampleRate:48000},
-        video:false
-      });
-      micActive=true;
-      micBtn.style.background='rgba(180,0,0,0.7)';
-      micBtn.style.borderColor='rgba(255,80,80,0.8)';
-      micBtn.innerHTML='🔴';
-      micBtn.title='Mic ON — tap to mute';
-      showNotification('🎤 Voice on — nearby players can hear you');
-      // Add tracks to any existing peer connections
-      Object.values(peerConnections).forEach(({pc})=>{
-        localStream.getTracks().forEach(t=>{ try{pc.addTrack(t,localStream);}catch(e){} });
-      });
-      // Re-scan for nearby players now that mic is live
-      setTimeout(()=>updateVoiceConnections(0), 500);
-      // Flush pending requests
-      pendingVoiceRequests.forEach(fromId=>{
-        if(!peerConnections[fromId]){
-          createPeerConnection(fromId, true);
-          socket.emit('voice:readyToConnect',{to:fromId});
-        }
-      });
-      pendingVoiceRequests.clear();
-    } catch(e){
-      const isHttp=location.protocol==='http:'&&!location.hostname.includes('localhost')&&!location.hostname.includes('127.0');
-      const msg=isHttp
-        ? '🔒 Voice requires HTTPS. Ask the host to enable SSL.'
-        : '🎤 Mic denied — tap the 🔒 icon in your browser address bar and allow microphone';
-      // Show a proper instructions overlay instead of just a toast
-      const errDiv=document.createElement('div');
-      errDiv.style.cssText=`position:fixed;inset:0;background:rgba(0,0,0,0.88);display:flex;
-        align-items:center;justify-content:center;z-index:500;`;
-      errDiv.innerHTML=`<div style="max-width:320px;background:#1a0000;border:2px solid #FF4444;
-        border-radius:16px;padding:24px;text-align:center;color:white;font-family:sans-serif;">
-        <div style="font-size:2rem;margin-bottom:10px;">🚫</div>
-        <h3 style="margin:0 0 10px;">Microphone Blocked</h3>
-        <p style="opacity:0.8;font-size:0.85rem;line-height:1.6;margin-bottom:16px;">${msg}</p>
-        <p style="opacity:0.55;font-size:0.75rem;margin-bottom:16px;">On Chrome/Firefox mobile:<br>
-        Tap the 🔒 lock icon → Site settings → Microphone → Allow</p>
-        <button onclick="this.parentElement.parentElement.remove()"
-          style="background:#AA2222;color:white;border:none;border-radius:8px;
-          padding:10px 24px;cursor:pointer;font-size:14px;">OK</button>
-      </div>`;
-      document.body.appendChild(errDiv);
-      console.warn('Mic error:',e);
-    }
+    await enableMic();
   });
   document.getElementById('micNo')?.addEventListener('click',()=>{
     micConfirmOverlay.style.display='none';
