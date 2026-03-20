@@ -2854,6 +2854,8 @@ async function enableMic(){
     Object.values(peerConnections).forEach(({pc})=>{
       localStream.getTracks().forEach(t=>{ try{pc.addTrack(t,localStream);}catch(e){} });
     });
+    // Re-scan for nearby players now that mic is live — triggers fresh initiation
+    setTimeout(()=>updateVoiceConnections(0), 500);
   } catch(e){
     showNotification('Microphone access denied');
     console.warn('Mic error:',e);
@@ -2896,6 +2898,8 @@ setTimeout(()=>{
       Object.values(peerConnections).forEach(({pc})=>{
         localStream.getTracks().forEach(t=>{ try{pc.addTrack(t,localStream);}catch(e){} });
       });
+      // Re-scan for nearby players now that mic is live
+      setTimeout(()=>updateVoiceConnections(0), 500);
     } catch(e){
       const isHttp=location.protocol==='http:'&&!location.hostname.includes('localhost')&&!location.hostname.includes('127.0');
       const msg=isHttp
@@ -3934,7 +3938,20 @@ function connectMultiplayer(password=''){
 
     // ── WebRTC Signaling ──
     socket.on('voice:request',(data)=>{
-      if(!micActive||!localStream) return;
+      console.log('[VOICE] Received voice:request from',data.from,'micActive=',micActive,'hasStream=',!!localStream);
+      if(!micActive||!localStream){
+        // Mic not ready yet — wait up to 3s then retry
+        console.log('[VOICE] Mic not ready, queuing...');
+        setTimeout(()=>{
+          console.log('[VOICE] Retrying voice:request from',data.from,'micActive=',micActive,'hasStream=',!!localStream);
+          if(micActive&&localStream){
+            createPeerConnection(data.from, true);
+            socket.emit('voice:readyToConnect',{to:data.from});
+            showNotification('🎤 Voice connecting...');
+          }
+        },3000);
+        return;
+      }
       createPeerConnection(data.from, true);
       socket.emit('voice:readyToConnect',{to:data.from});
       showNotification('🎤 Voice connecting...');
