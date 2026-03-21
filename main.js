@@ -6324,7 +6324,7 @@ function getOrCreateCarMesh(username){
   if(carMeshes[username]) return carMeshes[username];
   const g = buildCarMesh();
   // Try to load GLTF if available
-  import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
+ import('https://unpkg.com/three@0.183.2/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
     new GLTFLoader().load('/porsche_gt3.glb', (gltf) => {
       g.clear();
       gltf.scene.scale.setScalar(1.5);
