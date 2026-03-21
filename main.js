@@ -6322,15 +6322,13 @@ function buildCarMesh(){
 function getOrCreateCarMesh(username){
   if(carMeshes[username]) return carMeshes[username];
   const g = new THREE.Group();
-  // Start loading GLTF immediately
-  import('https://unpkg.com/three@0.183.2/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
+  import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
     new GLTFLoader().load('/porsche_gt3.glb', (gltf) => {
-      while(g.children.length) g.remove(g.children[0]); // clear box mesh
+      while(g.children.length) g.remove(g.children[0]);
       gltf.scene.scale.setScalar(1.5);
       gltf.scene.rotation.y = 0;
       g.add(gltf.scene);
     }, undefined, (err) => {
-      // GLTF failed - build box mesh as fallback
       const box = buildCarMesh();
       box.children.forEach(c => g.add(c.clone()));
     });
