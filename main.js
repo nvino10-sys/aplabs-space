@@ -4126,7 +4126,7 @@ function renderSocialPanel(){
       <span style="font-size:1.5rem;">💰</span>
       <div>
         <div style="font-size:0.75rem;opacity:0.55;">SpaceBucks</div>
-        <div id="walletAmount" style="font-size:1.3rem;font-weight:bold;color:#FFD700;">${myChips.toLocaleString()}</div>
+        <div id="walletAmount" style="font-size:1.3rem;font-weight:bold;color:#FFD700;">${(window.myChips||0).toLocaleString()}</div>
       </div>
     </div>
     ${friendsOnline.length===0&&friendsOffline.length===0
