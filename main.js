@@ -6323,18 +6323,20 @@ function buildCarMesh(){
 function getOrCreateCarMesh(username){
   if(carMeshes[username]) return carMeshes[username];
   const g = buildCarMesh();
-  // Try to load GLTF if available
-import('https://unpkg.com/three@0.183.2/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
+  g._gltfLoading = true; // ← ADD FLAG
+  import('https://unpkg.com/three@0.183.2/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
     new GLTFLoader().load('/porsche_gt3.glb', (gltf) => {
+      if(!g._gltfLoading) return; // ← already cleared, bail
+      g._gltfLoading = false;
       g.clear();
       gltf.scene.scale.setScalar(1.5);
       gltf.scene.rotation.y = 0;
       g.add(gltf.scene);
     }, undefined, (err) => {
       console.warn('GLTF load failed, keeping box mesh', err);
-      // don't clear — box mesh stays
+      g._gltfLoading = false;
     });
-  }).catch(()=>{});
+  }).catch(()=>{ g._gltfLoading = false; });
   g.position.set(CAR_SPAWN_X, 0, CAR_SPAWN_Z);
   scene.add(g);
   carMeshes[username] = g;
