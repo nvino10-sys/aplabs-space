@@ -3057,7 +3057,20 @@ function update(){
     clouds.forEach(c=>{c.group.position.x+=c.speed*delta;if(c.group.position.x>100)c.group.position.x=-100;});
     flags.forEach(f=>{f.rotation.z=Math.sin(totalTime*2.5)*0.12;});
     animBlimp();return;
+    }
+  if(carDriving){
+    clouds.forEach(c=>{c.group.position.x+=c.speed*delta;if(c.group.position.x>100)c.group.position.x=-100;});
+    flags.forEach(f=>{f.rotation.z=Math.sin(totalTime*2.5)*0.12;});
+    animBlimp();
+    updateRocket(delta,totalTime);
+    updateAnimals(delta,totalTime);
+    updateRobots(delta,totalTime);
+    updateLounge(delta,totalTime);
+    updatePet(delta,totalTime);
+    updateNimbus(delta,totalTime);
+    return;
   }
+  
 
   if(inRoom||isSitting){
     clouds.forEach(c=>{c.group.position.x+=c.speed*delta;if(c.group.position.x>100)c.group.position.x=-100;});
@@ -6013,3 +6026,664 @@ const _slotPoll=setInterval(()=>{
 window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);});
 function animate(){requestAnimationFrame(animate);update();renderer.render(scene,camera);}
 animate();
+
+// ══════════════════════════════════════════════════════════════
+// ─── CAR SYSTEM (append to END of main.js) ────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ── CONSTANTS ──
+const CAR_L_CX = 70, CAR_R_CX = 102;
+const CAR_TRACK_CZ = -60;
+const CAR_TRACK_R  = 16;
+const CAR_TRACK_W  = 14;   // doubled from 7
+const CAR_VENDOR_X = 86, CAR_VENDOR_Z = -33;
+var CAR_SPAWN_X = 86, CAR_SPAWN_Z = -46;
+
+// ── STATE ──
+var carDriving    = false;
+var carOwned      = false;
+var nearCarVendor = false;
+var nearCarMesh   = false;
+var carPhysics = { x:CAR_SPAWN_X, y:0, z:CAR_SPAWN_Z, rotY:0, speed:0 };
+var engineAudio = null;
+var engineGain  = null;
+var _engineCtx  = null;
+
+// Multiple car meshes: username -> THREE.Group
+var carMeshes = {};
+
+function stopEngineAudio(){
+  try{ if(engineAudio){ engineAudio.stop(); } } catch(e){}
+  try{ if(window._engineAudio2){ window._engineAudio2.stop(); } } catch(e){}
+  engineAudio = null; engineGain = null; window._engineFilter = null; window._engineAudio2 = null;
+  try{ if(_engineCtx){ _engineCtx.close(); } } catch(e){}
+  _engineCtx = null;
+}
+
+const CAR_MAX_SPEED   = 20;
+const CAR_ACCEL       = 10;
+const CAR_BRAKE_FORCE = 18;
+const CAR_REVERSE_MAX = -7;
+const CAR_STEER_RATE  = 1.9;
+const CAR_FRICTION    = 0.93;
+const CAR_SYNC_MS     = 50;
+let   carSyncTimer    = 0;
+
+// ══════════════════════════════════════════════════════════════
+// ── BUILD FIGURE-8 TRACK (doubled width, barrier collision)
+// ══════════════════════════════════════════════════════════════
+(function buildCarTrack(){
+  const N = 24;
+  const CROSS_X = (CAR_L_CX + CAR_R_CX) / 2;
+
+  [CAR_L_CX, CAR_R_CX].forEach(cx => {
+    const segLen = (2 * Math.PI * CAR_TRACK_R / N) + 0.9;
+
+    for(let i = 0; i < N; i++){
+      const a  = (i / N) * Math.PI * 2;
+      const sx = cx + Math.cos(a) * CAR_TRACK_R;
+      const sz = CAR_TRACK_CZ + Math.sin(a) * CAR_TRACK_R;
+      const rY = a + Math.PI / 2;
+
+      // Asphalt
+      const road = box(segLen, 0.1, CAR_TRACK_W, 0x3A3A3A, sx, 0.05, sz, false);
+      road.rotation.y = rY;
+
+      // Edge lines
+      const iR = CAR_TRACK_R - CAR_TRACK_W / 2 + 0.3;
+      const oR = CAR_TRACK_R + CAR_TRACK_W / 2 - 0.3;
+      const li = box(segLen, 0.12, 0.28, 0xFFFFFF,
+        cx + Math.cos(a)*iR, 0.06, CAR_TRACK_CZ + Math.sin(a)*iR, false);
+      li.rotation.y = rY;
+      const lo = box(segLen, 0.12, 0.28, 0xFFFFFF,
+        cx + Math.cos(a)*oR, 0.06, CAR_TRACK_CZ + Math.sin(a)*oR, false);
+      lo.rotation.y = rY;
+
+      // Dashed center line
+      if(i % 3 === 0){
+        const dash = box(segLen * 0.45, 0.13, 0.2, 0xFFFFFF, sx, 0.065, sz, false);
+        dash.rotation.y = rY;
+      }
+
+      // Outer barrier — alternating red/white, solid collision boxes stored
+      const bR = CAR_TRACK_R + CAR_TRACK_W / 2 + 0.55;
+      const barrier = box(segLen + 0.15, 0.6, 0.45,
+        i % 2 === 0 ? 0xCC2222 : 0xEEEEEE,
+        cx + Math.cos(a)*bR, 0.3, CAR_TRACK_CZ + Math.sin(a)*bR, false);
+      barrier.rotation.y = rY;
+    }
+  });
+
+  // Crossing strip
+  const crossLen = CAR_R_CX - CAR_L_CX + CAR_TRACK_W;
+  box(crossLen, 0.1, CAR_TRACK_W, 0x3A3A3A, CROSS_X, 0.05, CAR_TRACK_CZ, false);
+
+  // Checkered start/finish
+  for(let i = 0; i < 4; i++) for(let j = 0; j < 4; j++){
+    box(1.55, 0.13, 1.55, (i+j)%2===0 ? 0xFFFFFF : 0x111111,
+      CROSS_X - 2.33 + i*1.55, 0.07, CAR_TRACK_CZ - 2.33 + j*1.55, false);
+  }
+
+  // Entrance road
+  box(CAR_TRACK_W, 0.1, 15, 0x3A3A3A, CROSS_X, 0.05, CAR_VENDOR_Z - 7.5, false);
+  box(CAR_TRACK_W, 0.1, 14, 0x3A3A3A, CROSS_X, 0.05, CAR_VENDOR_Z - 21, false);
+
+  // Tire stacks
+  [[CROSS_X - 5, CAR_VENDOR_Z + 1], [CROSS_X + 5, CAR_VENDOR_Z + 1]].forEach(([tx, tz]) => {
+    for(let t = 0; t < 3; t++){
+      const tire = new THREE.Mesh(
+        new THREE.TorusGeometry(0.45, 0.2, 6, 12),
+        new THREE.MeshLambertMaterial({ color: 0x111111 })
+      );
+      tire.rotation.x = Math.PI / 2;
+      tire.position.set(tx, 0.18 + t * 0.43, tz);
+      scene.add(tire);
+    }
+  });
+
+  // Race track sign
+  cyl(0.1, 0.1, 5, 6, 0x888888, CROSS_X - 4.5, 2.5, CAR_VENDOR_Z + 5, false);
+  cyl(0.1, 0.1, 5, 6, 0x888888, CROSS_X + 4.5, 2.5, CAR_VENDOR_Z + 5, false);
+  box(10, 1.8, 0.28, 0x110022, CROSS_X, 5.5, CAR_VENDOR_Z + 5.1, false);
+  for(let i = 0; i < 8; i++){
+    box(1.1, 0.5, 0.12, i%2===0 ? 0xFF5500 : 0xFFCC00,
+      CROSS_X - 3.85 + i*1.1, 5.5, CAR_VENDOR_Z + 5.25, false);
+  }
+  box(9.4, 0.25, 0.1, 0xFFCC00, CROSS_X, 6.1,  CAR_VENDOR_Z + 5.25, false);
+  box(9.4, 0.25, 0.1, 0xFFCC00, CROSS_X, 4.9,  CAR_VENDOR_Z + 5.25, false);
+})();
+
+
+
+// ══════════════════════════════════════════════════════════════
+// ── VENDOR NPC ──
+// ══════════════════════════════════════════════════════════════
+const carVendorGroup = new THREE.Group();
+(function buildCarVendor(){
+  const jumpsuit = new THREE.MeshLambertMaterial({ color: 0x2255CC });
+  const skin     = new THREE.MeshLambertMaterial({ color: 0xFFCC88 });
+  const helmet   = new THREE.MeshLambertMaterial({ color: 0xFF5500 });
+  const visorMat = new THREE.MeshBasicMaterial({ color:0xCCEEFF, transparent:true, opacity:0.7 });
+  const goldMat  = new THREE.MeshLambertMaterial({ color: 0xFFD700 });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.52,0.62,0.38), jumpsuit);
+  body.position.y = 0.88; carVendorGroup.add(body);
+  const collar = new THREE.Mesh(new THREE.BoxGeometry(0.53,0.1,0.39),
+    new THREE.MeshLambertMaterial({ color: 0xFFCC00 }));
+  collar.position.y = 1.18; carVendorGroup.add(collar);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.44,0.44,0.42), skin);
+  head.position.set(0,1.32,0.04); carVendorGroup.add(head);
+  const helm = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.52,0.5), helmet);
+  helm.position.set(0,1.36,0); carVendorGroup.add(helm);
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.38,0.22,0.06), visorMat);
+  visor.position.set(0,1.32,0.27); carVendorGroup.add(visor);
+  [-0.11,0.11].forEach(ex => {
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.07,0.07,0.04),
+      new THREE.MeshBasicMaterial({ color:0x111111 }));
+    eye.position.set(ex,1.32,0.26); carVendorGroup.add(eye);
+  });
+  [-0.36,0.36].forEach(ax => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.15,0.4,0.15), jumpsuit);
+    arm.position.set(ax,0.86,0); carVendorGroup.add(arm);
+  });
+  [-0.14,0.14].forEach(lx => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.18,0.42,0.2), jumpsuit);
+    leg.position.set(lx,0.29,0); carVendorGroup.add(leg);
+  });
+  const keyFob = new THREE.Mesh(new THREE.BoxGeometry(0.12,0.06,0.22), goldMat);
+  keyFob.position.set(0.52,0.62,0.1); carVendorGroup.add(keyFob);
+  const keyRing = new THREE.Mesh(new THREE.TorusGeometry(0.06,0.015,5,10), goldMat);
+  keyRing.position.set(0.52,0.66,0); carVendorGroup.add(keyRing);
+
+  box(3.8, 1.0, 1.3, 0x8B5E3C, CAR_VENDOR_X,  0.75, CAR_VENDOR_Z+1.8, false);
+  box(3.8, 0.1, 1.5, 0xAA7744, CAR_VENDOR_X,  1.28, CAR_VENDOR_Z+1.8, false);
+  box(3.8, 1.9, 0.15, 0x664411, CAR_VENDOR_X, 1.15, CAR_VENDOR_Z+2.6, false);
+  box(3.2, 0.9, 0.1,  0x1a1a2e, CAR_VENDOR_X, 2.7,  CAR_VENDOR_Z+2.7, false);
+  box(3.0, 0.6, 0.12, 0xFF5500, CAR_VENDOR_X, 2.7,  CAR_VENDOR_Z+2.75, false);
+  box(1.2, 0.3, 0.1, 0xFFD700,  CAR_VENDOR_X, 1.1,  CAR_VENDOR_Z+1.2, false);
+  box(0.6, 0.15, 0.28, 0xFFCC00, CAR_VENDOR_X-0.5, 1.35, CAR_VENDOR_Z+1.2, false);
+  box(0.3, 0.12, 0.24, 0xFFCC00, CAR_VENDOR_X-0.45, 1.48, CAR_VENDOR_Z+1.2, false);
+
+  carVendorGroup.position.set(CAR_VENDOR_X - 0.8, 0, CAR_VENDOR_Z + 0.5);
+  carVendorGroup.rotation.y = Math.PI * 0.12;
+  scene.add(carVendorGroup);
+})();
+let carVendorBobTime = 0;
+
+// Teleport menu entry
+{
+  const trackDest = document.createElement('div');
+  trackDest.textContent = '🏎️ Race Track';
+  trackDest.style.cssText = `padding:11px 18px;color:white;font-family:sans-serif;font-size:14px;
+    cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.08);transition:background 0.15s;`;
+  trackDest.addEventListener('mouseover', () => trackDest.style.background='rgba(255,255,255,0.15)');
+  trackDest.addEventListener('mouseout',  () => trackDest.style.background='transparent');
+  const goTrack = () => {
+    camera.position.set(CAR_VENDOR_X, GROUND_Y, CAR_VENDOR_Z - 2);
+    menuList.style.display='none'; menuOpen=false;
+  };
+  trackDest.addEventListener('click',    goTrack);
+  trackDest.addEventListener('touchend', goTrack);
+  menuList.insertBefore(trackDest, menuList.firstChild);
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── CAR MESH FACTORY ──
+// ══════════════════════════════════════════════════════════════
+function buildCarMesh(){
+  const group   = new THREE.Group();
+  const yellow  = new THREE.MeshLambertMaterial({ color: 0xFFCC00 });
+  const black   = new THREE.MeshLambertMaterial({ color: 0x111111 });
+  const glass   = new THREE.MeshLambertMaterial({ color:0x113344, transparent:true, opacity:0.7 });
+  const silver  = new THREE.MeshLambertMaterial({ color: 0xBBBBBB });
+  const red     = new THREE.MeshLambertMaterial({ color: 0xFF2200 });
+  const frontL  = new THREE.MeshBasicMaterial({ color: 0xFFFF99 });
+  const rearL   = new THREE.MeshBasicMaterial({ color: 0xFF2200 });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.42, 1.92), yellow);
+  body.position.y = 0.36; group.add(body);
+  [-0.99, 0.99].forEach(z => {
+    const sill = new THREE.Mesh(new THREE.BoxGeometry(4.0, 0.22, 0.17), black);
+    sill.position.set(0, 0.2, z); group.add(sill);
+  });
+  [-0.9, 0.9].forEach(z => {
+    const haunch = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.36, 0.26), yellow);
+    haunch.position.set(-1.1, 0.43, z); group.add(haunch);
+  });
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.5, 1.66), yellow);
+  cabin.position.set(-0.22, 0.82, 0); group.add(cabin);
+  const ws = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.54, 1.56), glass);
+  ws.position.set(0.64, 0.79, 0); ws.rotation.z = 0.4; group.add(ws);
+  const rw = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.44, 1.52), glass);
+  rw.position.set(-0.96, 0.73, 0); rw.rotation.z = -0.3; group.add(rw);
+  const wingBar = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.1, 2.2), black);
+  wingBar.position.set(-1.9, 1.12, 0); group.add(wingBar);
+  [-1.06, 1.06].forEach(z => {
+    const ep = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.68, 0.1), black);
+    ep.position.set(-1.9, 0.83, z); group.add(ep);
+    const strut = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.14), black);
+    strut.position.set(-1.72, 0.72, z * 0.62); group.add(strut);
+  });
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.1, 1.82), yellow);
+  hood.position.set(1.48, 0.62, 0); group.add(hood);
+  const splitter = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.08, 2.0), black);
+  splitter.position.set(2.26, 0.28, 0); group.add(splitter);
+  const frontLip = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.38, 1.92), black);
+  frontLip.position.set(2.16, 0.4, 0); group.add(frontLip);
+  [[2.12, 0.46, 0.73], [2.12, 0.46, -0.73]].forEach(([x,y,z]) => {
+    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.26, 0.4), frontL);
+    hl.position.set(x, y, z); group.add(hl);
+    const drl = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.07, 0.36), frontL);
+    drl.position.set(x-0.01, y-0.18, z); group.add(drl);
+  });
+  [[-2.14, 0.46, 0.8], [-2.14, 0.46, -0.8]].forEach(([x,y,z]) => {
+    const tl = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.24, 0.34), rearL);
+    tl.position.set(x, y, z); group.add(tl);
+  });
+  const lightBar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 1.6), rearL);
+  lightBar.position.set(-2.14, 0.52, 0); group.add(lightBar);
+  [[-0.3], [0.3]].forEach(([z]) => {
+    const exhaust = new THREE.Mesh(new THREE.CylinderGeometry(0.1,0.1,0.18,8), black);
+    exhaust.rotation.z = Math.PI/2; exhaust.position.set(-2.2, 0.22, z);
+    group.add(exhaust);
+  });
+  const wheelPos = [
+    [1.26, 0.3, 0.99], [1.26, 0.3, -0.99],
+    [-1.26, 0.3, 0.99], [-1.26, 0.3, -0.99]
+  ];
+  wheelPos.forEach(([wx,wy,wz]) => {
+    const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.32,0.32,0.25,16), black);
+    tire.rotation.z = Math.PI/2; tire.position.set(wx,wy,wz); group.add(tire);
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.23,0.23,0.27,10), silver);
+    rim.rotation.z = Math.PI/2; rim.position.set(wx,wy,wz); group.add(rim);
+    for(let s=0; s<5; s++){
+      const sa = (s/5)*Math.PI*2;
+      const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.04,0.04), silver);
+      spoke.rotation.z = Math.PI/2;
+      spoke.position.set(wx, wy + Math.cos(sa)*0.14, wz + Math.sin(sa)*0.14);
+      group.add(spoke);
+    }
+    const caliper = new THREE.Mesh(new THREE.BoxGeometry(0.14,0.2,0.22), red);
+    caliper.position.set(wx, wy, wz + (wz>0 ? -0.06 : 0.06)); group.add(caliper);
+  });
+  [[0.92,0.75,1.01],[0.92,0.75,-1.01]].forEach(([x,y,z]) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.32,0.13,0.2), black);
+    m.position.set(x,y,z); group.add(m);
+  });
+  const stripe = new THREE.Mesh(new THREE.BoxGeometry(3.6,0.06,0.14), black);
+  stripe.position.set(0, 0.58, 0.97); group.add(stripe);
+  const stripe2 = stripe.clone(); stripe2.position.z = -0.97; group.add(stripe2);
+  const plate = new THREE.Mesh(new THREE.BoxGeometry(0.08,0.18,0.52),
+    new THREE.MeshLambertMaterial({ color:0xFFFFFF }));
+  plate.position.set(2.18,0.36,0); group.add(plate);
+  return group;
+}
+
+// ── Get or create a car mesh for a username ──
+function getOrCreateCarMesh(username){
+  if(carMeshes[username]) return carMeshes[username];
+  const g = buildCarMesh();
+  // Try to load GLTF if available
+  import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
+    new GLTFLoader().load('/porsche_gt3.glb', (gltf) => {
+      g.clear();
+      gltf.scene.scale.setScalar(1.5);
+      gltf.scene.rotation.y = 0;
+      g.add(gltf.scene);
+    });
+  }).catch(()=>{});
+  g.position.set(CAR_SPAWN_X, 0, CAR_SPAWN_Z);
+  scene.add(g);
+  carMeshes[username] = g;
+  return g;
+}
+
+// ── DRIVER LABEL ──
+const carDriverLabel = document.createElement('div');
+carDriverLabel.style.cssText = `position:fixed;background:rgba(0,0,0,0.72);color:#FFD700;
+  font-family:sans-serif;font-size:12px;font-weight:bold;padding:3px 10px;border-radius:10px;
+  pointer-events:none;display:none;z-index:122;transform:translate(-50%,-100%);white-space:nowrap;`;
+document.body.appendChild(carDriverLabel);
+
+// ── CAR PROMPT ──
+const carPrompt = document.createElement('div');
+carPrompt.style.cssText = `position:fixed;bottom:200px;left:50%;transform:translateX(-50%);
+  background:rgba(0,0,0,0.8);color:white;padding:12px 28px;border-radius:12px;
+  font-family:sans-serif;font-size:15px;border:2px solid #FF5500;backdrop-filter:blur(8px);
+  display:none;z-index:100;cursor:pointer;user-select:none;
+  box-shadow:0 0 14px rgba(255,85,0,0.45);`;
+carPrompt.addEventListener('click',    () => handleCarInteract());
+carPrompt.addEventListener('touchend', e => { e.preventDefault(); handleCarInteract(); }, { passive:false });
+document.body.appendChild(carPrompt);
+
+// ── SPEEDOMETER HUD ──
+const carHUD = document.createElement('div');
+carHUD.style.cssText = `position:fixed;bottom:80px;right:20px;background:rgba(0,0,0,0.78);
+  color:white;font-family:monospace;font-size:20px;font-weight:bold;
+  padding:10px 20px;border-radius:12px;display:none;z-index:100;
+  border:1px solid rgba(255,255,255,0.2);letter-spacing:0.04em;min-width:110px;text-align:center;`;
+document.body.appendChild(carHUD);
+const carKeyBtn = document.createElement('div');
+carKeyBtn.innerHTML = '🔑';
+carKeyBtn.style.cssText = `position:fixed;bottom:20px;left:100px;width:52px;height:52px;
+  background:rgba(0,0,0,0.75);border:2px solid #FFD700;border-radius:14px;
+  font-size:26px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;z-index:100;user-select:none;box-shadow:0 0 10px rgba(255,215,0,0.3);`;
+carKeyBtn.addEventListener('click',    () => summonCar());
+carKeyBtn.addEventListener('touchend', e => { e.preventDefault(); summonCar(); }, { passive:false });
+document.body.appendChild(carKeyBtn);
+
+function summonCar(){
+  if(!carOwned){
+    showNotification('🏎️ No car key! Visit the race track to get your license.');
+    return;
+  }
+  if(carDriving){
+    showNotification('🏎️ You\'re already driving!');
+    return;
+  }
+  if(socket) socket.emit('car:summon');
+  showNotification('🔑 Car summoned!');
+}
+
+// ── INTERACTION ──
+function handleCarInteract(){
+  if(joinOverlay.style.display !== 'none') return;
+  if(tosOverlay.style.display  !== 'none') return;
+  if(inRoom || golfMode || slideMode)      return;
+
+  if(nearCarVendor){
+    if(!carOwned){ if(socket) socket.emit('car:buy'); }
+    else showNotification('🔑 You already have a car key! Head to the track.');
+    return;
+  }
+  if(nearCarMesh && !carDriving){
+    if(!carOwned){
+      showNotification('🔑 Buy a car key from the vendor first!');
+      return;
+    }
+    if(socket) socket.emit('car:enter');
+    return;
+  }
+  if(carDriving){
+    exitCar();
+  }
+}
+
+function exitCar(){
+  if(!carDriving) return;
+  carDriving = false;
+  if(socket) socket.emit('car:exit');
+  carHUD.style.display    = 'none';
+  carPrompt.style.display = 'none';
+  camera.position.set(carPhysics.x + 2.5, GROUND_Y, carPhysics.z + 2.5);
+  velocityY = 0; isGrounded = true;
+  leftArm.visible = true; rightArm.visible = true;
+  if(!window.matchMedia('(pointer:coarse)').matches){
+    setTimeout(() => renderer.domElement.requestPointerLock(), 100);
+  }
+  showNotification('👣 Stepped out of the car');
+}
+
+document.addEventListener('keydown', e => {
+  if(e.code !== 'KeyE') return;
+  if(joinOverlay.style.display !== 'none') return;
+  if(tosOverlay.style.display  !== 'none') return;
+  if(nearCarVendor || nearCarMesh || carDriving) handleCarInteract();
+});
+
+// ══════════════════════════════════════════════════════════════
+// ── CAR UPDATE LOOP ──
+// ══════════════════════════════════════════════════════════════
+function updateCar(dt){
+  carVendorBobTime += dt;
+  carVendorGroup.position.y = Math.sin(carVendorBobTime * 1.3) * 0.05;
+
+  // Proximity to vendor
+  const vdx = camera.position.x - (CAR_VENDOR_X - 0.8);
+  const vdz = camera.position.z - (CAR_VENDOR_Z + 0.5);
+  nearCarVendor = !carDriving && Math.sqrt(vdx*vdx + vdz*vdz) < 3.5;
+
+  // Proximity to MY car
+  const myCar = carMeshes[myUsername];
+  if(myCar && !carDriving){
+    const cdx = camera.position.x - myCar.position.x;
+    const cdz = camera.position.z - myCar.position.z;
+    nearCarMesh = Math.sqrt(cdx*cdx + cdz*cdz) < 3.5;
+  } else {
+    nearCarMesh = false;
+  }
+
+  // Prompt
+  if(carDriving){
+    carPrompt.textContent   = 'Press E to exit 🚗';
+    carPrompt.style.display = 'block';
+  } else if(nearCarVendor){
+    carPrompt.textContent   = carOwned
+      ? '🔑 Already bought! Head to the track'
+      : '🏎️ Press E to buy car key (1000 SB)';
+    carPrompt.style.display = 'block';
+  } else if(nearCarMesh){
+    const driver = myCar && myCar.userData.driverUsername;
+    if(!driver){
+      carPrompt.textContent   = carOwned
+        ? '🏎️ Press E to drive the Porsche GT3 RS!'
+        : '🔑 Need a car key from the vendor!';
+      carPrompt.style.display = 'block';
+    } else {
+      carPrompt.style.display = 'none';
+    }
+  } else {
+    carPrompt.style.display = 'none';
+  }
+
+  // Driver labels for all remote cars
+  let labelShown = false;
+  Object.entries(carMeshes).forEach(([username, mesh]) => {
+    if(username === myUsername) return;
+    const driver = mesh.userData.driverUsername;
+    if(driver){
+      const wp = mesh.position.clone().add(new THREE.Vector3(0, 2.6, 0));
+      const pr = wp.clone().project(camera);
+      const sx = (pr.x*0.5+0.5)*window.innerWidth;
+      const sy = (-pr.y*0.5+0.5)*window.innerHeight;
+      if(!labelShown && pr.z < 1 && sy > 0 && sy < window.innerHeight){
+        carDriverLabel.textContent   = '🏎️ ' + driver;
+        carDriverLabel.style.left    = sx + 'px';
+        carDriverLabel.style.top     = sy + 'px';
+        carDriverLabel.style.display = 'block';
+        labelShown = true;
+      }
+    }
+  });
+  if(!labelShown) carDriverLabel.style.display = 'none';
+
+  if(!carDriving) return;
+
+  // ── PHYSICS ──
+  const fwd   = keys['KeyW'] || keys['ArrowUp']    || (joystick.active && joystick.dy < -0.3);
+  const rev   = keys['KeyS'] || keys['ArrowDown']  || (joystick.active && joystick.dy >  0.3);
+  const left  = keys['KeyA'] || keys['ArrowLeft']  || (joystick.active && joystick.dx < -0.3);
+  const right = keys['KeyD'] || keys['ArrowRight'] || (joystick.active && joystick.dx >  0.3);
+
+  if(fwd){
+    carPhysics.speed = Math.min(carPhysics.speed + CAR_ACCEL * dt, CAR_MAX_SPEED);
+  } else if(rev){
+    if(carPhysics.speed > 0.5){
+      carPhysics.speed = Math.max(carPhysics.speed - CAR_BRAKE_FORCE * dt, 0);
+    } else {
+      carPhysics.speed = Math.max(carPhysics.speed - CAR_ACCEL * 0.55 * dt, CAR_REVERSE_MAX);
+    }
+  } else {
+    carPhysics.speed *= Math.pow(CAR_FRICTION, dt * 60);
+    if(Math.abs(carPhysics.speed) < 0.06) carPhysics.speed = 0;
+  }
+
+  const absSpd     = Math.abs(carPhysics.speed);
+  const steerFact  = Math.min(absSpd / 4, 1);
+  const steerSign  = carPhysics.speed >= 0 ? 1 : -1;
+  const steerDelta = CAR_STEER_RATE * steerFact * dt * steerSign;
+  if(left)  carPhysics.rotY += steerDelta;
+  if(right) carPhysics.rotY -= steerDelta;
+
+  carPhysics.x += Math.sin(carPhysics.rotY) * carPhysics.speed * dt;
+  carPhysics.z += Math.cos(carPhysics.rotY) * carPhysics.speed * dt;
+  carPhysics.y  = getTerrainY(carPhysics.x, carPhysics.z);
+
+ 
+
+  // Apply to my mesh
+  const myMesh = carMeshes[myUsername];
+  if(myMesh){
+    myMesh.position.set(carPhysics.x, carPhysics.y, carPhysics.z);
+    myMesh.rotation.y = carPhysics.rotY;
+    myMesh.rotation.z = (right ? -1 : left ? 1 : 0) * steerFact * 0.045;
+  }
+
+  // ── Camera ──
+  yaw   = carPhysics.rotY + Math.PI - 0.05;
+  pitch = 0;
+  const leftX =  Math.cos(carPhysics.rotY) * 0.38;
+  const leftZ = -Math.sin(carPhysics.rotY) * 0.38;
+  const fwdX  = -Math.sin(carPhysics.rotY) * 0.15;
+  const fwdZ  = -Math.cos(carPhysics.rotY) * 0.15;
+  camera.position.x = carPhysics.x + leftX + fwdX;
+  camera.position.y = carPhysics.y + 1.42;
+  camera.position.z = carPhysics.z + leftZ + fwdZ;
+  camera.rotation.order = 'YXZ';
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+
+  // ── Speedometer + engine audio ──
+  const kmh = Math.abs(Math.round(carPhysics.speed * 3.6));
+  if(engineAudio && _engineCtx){
+    const freq = 55 + Math.abs(carPhysics.speed) * 6;
+    engineAudio.frequency.setValueAtTime(freq, _engineCtx.currentTime);
+    if(window._engineFilter) window._engineFilter.frequency.setValueAtTime(freq * 7, _engineCtx.currentTime);
+    engineGain.gain.setValueAtTime(carPhysics.speed === 0 ? 0.08 : 0.15, _engineCtx.currentTime);
+  }
+  carHUD.innerHTML   = `${kmh} <span style="font-size:11px;opacity:0.55;">km/h</span>`;
+  carHUD.style.color = kmh > 60 ? '#FF4400' : kmh > 30 ? '#FFAA00' : '#FFFFFF';
+
+  // ── Server sync ──
+  carSyncTimer += dt * 1000;
+  if(carSyncTimer >= CAR_SYNC_MS && socket){
+    carSyncTimer = 0;
+    socket.emit('car:move', {
+      x: carPhysics.x, y: carPhysics.y, z: carPhysics.z,
+      rotY: carPhysics.rotY, speed: carPhysics.speed
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── SOCKET EVENTS ──
+// ══════════════════════════════════════════════════════════════
+function setupCarSocketEvents(){
+  if(!socket) return;
+  socket.emit('car:getState');
+
+  socket.on('car:ownershipStatus', data => { carOwned = data.owned; });
+
+  // Full state of all cars (on join, after buy, after exit)
+  socket.on('car:allState', cars => {
+    cars.forEach(data => {
+      const mesh = getOrCreateCarMesh(data.username);
+      mesh.position.set(data.x, data.y || 0, data.z);
+      mesh.rotation.y = data.rotY;
+      mesh.userData.driverUsername = data.driverId ? data.username : null;
+      // Sync my own physics if I'm not driving
+      if(data.username === myUsername && !carDriving){
+        carPhysics.x = data.x; carPhysics.z = data.z; carPhysics.rotY = data.rotY;
+      }
+    });
+  });
+
+  socket.on('car:bought', () => {
+    carOwned = true;
+    // My car mesh gets created by the next car:allState broadcast
+    showNotification('🏎️ Car key bought! Head to the track.');
+    const credit = document.createElement('div');
+    credit.style.cssText = `position:fixed;bottom:140px;left:50%;transform:translateX(-50%);
+      background:rgba(0,0,0,0.72);color:rgba(255,255,255,0.65);font-family:sans-serif;
+      font-size:12px;padding:6px 16px;border-radius:8px;z-index:500;pointer-events:none;
+      border:1px solid rgba(255,255,255,0.15);transition:opacity 1s;`;
+    credit.textContent = '🏎️ Porsche GT3 RS · Model by Black Snow (CC BY)';
+    document.body.appendChild(credit);
+    setTimeout(() => { credit.style.opacity = '0'; }, 4000);
+    setTimeout(() => credit.remove(), 5200);
+  });
+
+  socket.on('car:entered', data => {
+    stopEngineAudio();
+    carDriving = true;
+    _engineCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const engineFilter = _engineCtx.createBiquadFilter();
+    engineFilter.type = 'lowpass';
+    engineFilter.frequency.setValueAtTime(300, _engineCtx.currentTime);
+    engineFilter.Q.setValueAtTime(12, _engineCtx.currentTime);
+    engineGain = _engineCtx.createGain();
+    engineGain.gain.setValueAtTime(0.12, _engineCtx.currentTime);
+    engineAudio = _engineCtx.createOscillator();
+    engineAudio.type = 'square';
+    engineAudio.frequency.setValueAtTime(50, _engineCtx.currentTime);
+    window._engineAudio2 = _engineCtx.createOscillator();
+    window._engineAudio2.type = 'square';
+    window._engineAudio2.frequency.setValueAtTime(53, _engineCtx.currentTime);
+    engineAudio.connect(engineFilter);
+    window._engineAudio2.connect(engineFilter);
+    engineFilter.connect(engineGain);
+    engineGain.connect(_engineCtx.destination);
+    window._engineFilter = engineFilter;
+    engineAudio.start();
+    window._engineAudio2.start();
+
+    carPhysics.x     = data.carState.x;
+    carPhysics.z     = data.carState.z;
+    carPhysics.rotY  = data.carState.rotY;
+    carPhysics.speed = 0;
+
+    const myMesh = getOrCreateCarMesh(myUsername);
+    myMesh.position.set(carPhysics.x, carPhysics.y, carPhysics.z);
+    myMesh.rotation.y = carPhysics.rotY;
+    myMesh.userData.driverUsername = myUsername;
+
+    carHUD.style.display = 'block';
+    leftArm.visible = false; rightArm.visible = false;
+    if(document.pointerLockElement) document.exitPointerLock();
+    showNotification('🏎️ WASD to drive · E to exit · Hit the figure-8!');
+  });
+
+  socket.on('car:moved', data => {
+    // Another player's car moved
+    if(data.username === myUsername) return;
+    const mesh = getOrCreateCarMesh(data.username);
+    mesh.position.set(data.x, data.y || 0, data.z);
+    mesh.rotation.y = data.rotY;
+    mesh.userData.driverUsername = data.username;
+  });
+
+  socket.on('car:exited', () => {
+    carDriving = false;
+    carPhysics.speed = 0;
+    stopEngineAudio();
+    carHUD.style.display = 'none';
+    const myMesh = carMeshes[myUsername];
+    if(myMesh) myMesh.userData.driverUsername = null;
+  });
+}
+
+const _carSocketPoll = setInterval(() => {
+  if(socket && mySocketId){ setupCarSocketEvents(); clearInterval(_carSocketPoll); }
+}, 650);
+
+// ── INDEPENDENT CAR LOOP ──
+{
+  let _carLastMs = performance.now();
+  (function _carFrame(){
+    requestAnimationFrame(_carFrame);
+    const now = performance.now();
+    updateCar(Math.min((now - _carLastMs) / 1000, 0.05));
+    _carLastMs = now;
+  })();
+}
