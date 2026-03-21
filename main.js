@@ -6319,23 +6319,30 @@ function buildCarMesh(){
   return group;
 }
 
+// Preload GLTF once
+var _gltfScene = null;
+import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
+  new GLTFLoader().load('/porsche_gt3.glb', (gltf) => {
+    _gltfScene = gltf.scene;
+    _gltfScene.scale.setScalar(1.5);
+    _gltfScene.rotation.y = 0;
+    // Apply to any cars already created
+    Object.values(carMeshes).forEach(g => {
+      while(g.children.length) g.remove(g.children[0]);
+      g.add(_gltfScene.clone());
+    });
+  });
+}).catch(e => console.warn('GLTFLoader import failed', e));
+
 function getOrCreateCarMesh(username){
   if(carMeshes[username]) return carMeshes[username];
   const g = new THREE.Group();
-  import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
-    new GLTFLoader().load('/porsche_gt3.glb', (gltf) => {
-      while(g.children.length) g.remove(g.children[0]);
-      gltf.scene.scale.setScalar(1.5);
-      gltf.scene.rotation.y = 0;
-      g.add(gltf.scene);
-    }, undefined, (err) => {
-      const box = buildCarMesh();
-      box.children.forEach(c => g.add(c.clone()));
-    });
-  }).catch(()=>{
-    const box = buildCarMesh();
-    box.children.forEach(c => g.add(c.clone()));
-  });
+  if(_gltfScene){
+    g.add(_gltfScene.clone());
+  } else {
+    // GLTF not loaded yet — build box mesh, will be replaced when GLTF loads
+    buildCarMesh().children.forEach(c => g.add(c.clone()));
+  }
   g.position.set(CAR_SPAWN_X, 0, CAR_SPAWN_Z);
   scene.add(g);
   carMeshes[username] = g;
