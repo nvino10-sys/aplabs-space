@@ -6319,24 +6319,25 @@ function buildCarMesh(){
   return group;
 }
 
-// ── Get or create a car mesh for a username ──
 function getOrCreateCarMesh(username){
   if(carMeshes[username]) return carMeshes[username];
-  const g = buildCarMesh();
-  g._gltfLoading = true; // ← ADD FLAG
+  const g = new THREE.Group();
+  // Start loading GLTF immediately
   import('https://unpkg.com/three@0.183.2/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
     new GLTFLoader().load('/porsche_gt3.glb', (gltf) => {
-      if(!g._gltfLoading) return; // ← already cleared, bail
-      g._gltfLoading = false;
-      g.clear();
+      while(g.children.length) g.remove(g.children[0]); // clear box mesh
       gltf.scene.scale.setScalar(1.5);
       gltf.scene.rotation.y = 0;
       g.add(gltf.scene);
     }, undefined, (err) => {
-      console.warn('GLTF load failed, keeping box mesh', err);
-      g._gltfLoading = false;
+      // GLTF failed - build box mesh as fallback
+      const box = buildCarMesh();
+      box.children.forEach(c => g.add(c.clone()));
     });
-  }).catch(()=>{ g._gltfLoading = false; });
+  }).catch(()=>{
+    const box = buildCarMesh();
+    box.children.forEach(c => g.add(c.clone()));
+  });
   g.position.set(CAR_SPAWN_X, 0, CAR_SPAWN_Z);
   scene.add(g);
   carMeshes[username] = g;
