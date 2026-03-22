@@ -5860,7 +5860,7 @@ function renderSlotMachine(){
       </div>
 
       <!-- Spin button -->
-      <button id="slotSpinBtn" onclick="window.slotSpin()" ${slotSpinning||myChips<slotBet?'disabled':''}
+      <button id="slotSpinBtn" onclick="window.slotSpin()" ${slotSpinning||(window.myChips||0)<slotBet?'disabled':''}
         style="background:${slotSpinning?'#555':'#CC2200'};color:white;border:none;
         border-radius:14px;padding:16px 48px;font-size:1.1rem;font-weight:bold;
         cursor:${slotSpinning?'not-allowed':'pointer'};width:100%;margin-bottom:12px;
@@ -5895,10 +5895,12 @@ window.closeSlots=()=>{
   relockPointer();
 };
 window.slotSpin=()=>{
-  if(slotBet > (window.myChips||0)) slotBet = window.myChips||0; // ← ADD
+  if(slotBet > (window.myChips||0)) slotBet = window.myChips||0;
   if(slotSpinning||(window.myChips||0)<slotBet) return;
   if(!socket){ showNotification('Not connected!'); return; }
   slotSpinning=true; slotResult=null;
+  // Safety timeout — reset if server doesn't respond in 5s
+  setTimeout(()=>{ if(slotSpinning){ slotSpinning=false; renderSlotMachine(); } }, 5000); // ← ADD
   // Update spin button state only
   const spinBtn=document.getElementById('slotSpinBtn');
   if(spinBtn){ spinBtn.disabled=true; spinBtn.textContent='Spinning...'; spinBtn.style.background='#555'; }
