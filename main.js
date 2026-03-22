@@ -5895,6 +5895,7 @@ window.closeSlots=()=>{
   relockPointer();
 };
 window.slotSpin=()=>{
+  if(slotBet > (window.myChips||0)) slotBet = window.myChips||0; // ← ADD
   if(slotSpinning||(window.myChips||0)<slotBet) return;
   if(!socket){ showNotification('Not connected!'); return; }
   slotSpinning=true; slotResult=null;
