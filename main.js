@@ -5853,6 +5853,10 @@ function renderSlotMachine(){
           border:1px solid ${slotBet===b?'#FFD700':'rgba(255,255,255,0.2)'};
           color:white;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px;">
           ${b} SB</button>`).join('')}
+                  <button onclick="window.slotSetBet(window.myChips||0)"
+          style="background:rgba(255,50,50,0.2);border:1px solid rgba(255,50,50,0.5);
+          color:white;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px;">
+          ALL IN</button>
       </div>
 
       <!-- Spin button -->
@@ -5884,7 +5888,7 @@ function renderSlotMachine(){
   if(socket) socket.emit('slots:getJackpot');
 }
 
-window.slotSetBet=(b)=>{ slotBet=b; slotResult=null; renderSlotMachine(); };
+window.slotSetBet=(b)=>{ slotBet=Math.max(1,Math.min(b, window.myChips||0)); slotResult=null; renderSlotMachine(); };
 window.closeSlots=()=>{
   if(slotOverlay){ slotOverlay.remove(); slotOverlay=null; }
   inRoom=false; safeSetVolume(0.35);
