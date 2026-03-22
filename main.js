@@ -4287,6 +4287,10 @@ function showPlayerMenu(socketId, screenX, screenY){
       style="padding:9px 14px;cursor:pointer;border-radius:8px;font-size:0.88rem;display:flex;align-items:center;gap:8px;color:#44FF88;">
       ⛳ Challenge to Golf!
     </div>
+    <div class="pmItem" onclick="window.requestDuel('${socketId}');window.closePlayerMenu()"
+      style="padding:9px 14px;cursor:pointer;border-radius:8px;font-size:0.88rem;display:flex;align-items:center;gap:8px;color:#FF4400;">
+      ⚔️ RoboDuel Challenge!
+    </div>
     <div class="pmItem" onclick="window.pmSendCoins('${socketId}')"
       style="padding:9px 14px;cursor:pointer;border-radius:8px;font-size:0.88rem;display:flex;align-items:center;gap:8px;color:#FFD700;">
       💰 Send SpaceBucks
@@ -4967,8 +4971,6 @@ scene.add(mannequin);
 addCollider(CSHOP_X,CSHOP_Z,10,8);
 addRoof(CSHOP_X,CSHOP_Z,10,8,5.3);
 
-// Connecting path between shops
-box(10,0.1,3, 0xCCBBAA, (SHOP_X+CSHOP_X)/2,0.06,SHOP_Z, false);
 
 let nearCosmeticShop=false;
 
@@ -6706,3 +6708,23 @@ const _carSocketPoll = setInterval(() => {
     _carLastMs = now;
   })();
 }
+// === MODULE BRIDGE ===
+window._mineScene            = scene;
+window._mineCamera           = camera;
+window._mineGetSocket        = () => socket;
+window._mineGetUsername      = () => myUsername;
+window._mineGetSocketId      = () => mySocketId;
+window._mineShowNotification = showNotification;
+window.colliders = colliders;
+window._mineIsBlocked        = () =>
+  inRoom || golfMode || slideMode || carDriving || chatOpen ||
+  isSitting || wishOverlay.style.display === 'flex' ||
+  pokerOverlay.style.display === 'flex' ||
+  loungePokerOverlay.style.display === 'flex';
+
+import('./mining-client.js');
+import('./workshop-client.js');
+import('./robots-client.js');
+import('./vendor-client.js');
+import('./battle-client.js');
+import('./market-client.js');
