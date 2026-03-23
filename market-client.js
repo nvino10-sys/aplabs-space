@@ -244,6 +244,7 @@ marketOverlay.style.cssText = `
   position:fixed;inset:0;background:rgba(0,5,15,0.97);color:white;
   font-family:'Segoe UI',sans-serif;z-index:350;display:none;
   align-items:flex-start;justify-content:center;overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
 `;
 document.body.appendChild(marketOverlay);
 
@@ -671,22 +672,35 @@ window.bankWithdraw = () => {
 };
 
 // ── PROMPTS ───────────────────────────────────────────────────────────────────
-function makePrompt(color, text) {
+const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || window.innerWidth < 768;
+
+function makePrompt(color, text, onClick) {
   const el = document.createElement('div');
   el.style.cssText = `
-    position:fixed;bottom:110px;left:50%;transform:translateX(-50%);
-    background:rgba(0,0,0,0.82);color:${color};padding:12px 28px;border-radius:12px;
-    font-family:sans-serif;font-size:15px;border:1px solid ${color}55;
-    backdrop-filter:blur(8px);display:none;z-index:100;cursor:pointer;user-select:none;
+    position:fixed;bottom:${isMobile ? '140px' : '110px'};left:50%;transform:translateX(-50%);
+    background:rgba(0,0,0,0.88);color:${color};
+    padding:${isMobile ? '18px 40px' : '12px 28px'};
+    border-radius:14px;font-family:sans-serif;
+    font-size:${isMobile ? '17px' : '15px'};
+    border:2px solid ${color}55;backdrop-filter:blur(8px);
+    display:none;z-index:100;cursor:pointer;user-select:none;
+    min-width:${isMobile ? '260px' : 'auto'};text-align:center;
+    box-shadow:0 4px 20px rgba(0,0,0,0.5);
+    -webkit-tap-highlight-color:transparent;
   `;
   el.textContent = text;
+  el.addEventListener('click', onClick);
+  el.addEventListener('touchend', e => { e.preventDefault(); onClick(); });
   document.body.appendChild(el);
   return el;
 }
 
-const atmPrompt      = makePrompt('#00FFCC', '🏦 Press E for ATM (Savings)');
-const terminalPrompt = makePrompt('#FF8800', '📈 Press E for Trading Terminal');
-const shadyPrompt    = makePrompt('#FFD700', '🕵️ Press E to talk to Whiskers');
+const atmPrompt      = makePrompt('#00FFCC', '🏦 Tap for ATM (Savings)', () => openMarket('bank'));
+const terminalPrompt = makePrompt('#FF8800', '📈 Tap for Trading Terminal', () => openMarket('stocks'));
+const shadyPrompt    = makePrompt('#FFD700', '🕵️ Tap to talk to Whiskers', () => {
+  const saying = SHADY_SAYS[Math.floor(Math.random()*SHADY_SAYS.length)];
+  NOTIFY(`Whiskers: ${saying}`);
+});
 
 // Shady guy sayings
 const SHADY_SAYS = [
@@ -743,32 +757,25 @@ function setupSocketEvents() {
 const _prevBlocked = window._mineIsBlocked;
 window._mineIsBlocked = () => (_prevBlocked?.() || false) || marketUIOpen;
 
+// ── OPEN MARKET ───────────────────────────────────────────────────────────────
+function openMarket(tab) {
+  marketUIOpen = true; marketTab = tab; tradeMode = null;
+  if (document.pointerLockElement) document.exitPointerLock();
+  marketOverlay.style.display = 'flex';
+  SKT()?.emit('market:getState');
+  renderMarketUI();
+}
+
 // ── E KEY ─────────────────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   if (e.code === 'Escape' && marketUIOpen) { window.closeMarket(); return; }
   if (e.code !== 'KeyE') return;
   if (window._mineIsBlocked()) return;
-
-  if (nearATM) {
-    marketUIOpen = true; marketTab = 'bank'; tradeMode = null;
-    if (document.pointerLockElement) document.exitPointerLock();
-    marketOverlay.style.display = 'flex';
-    SKT()?.emit('market:getState');
-    renderMarketUI();
-    return;
-  }
-  if (nearTerminal) {
-    marketUIOpen = true; marketTab = 'stocks'; tradeMode = null;
-    if (document.pointerLockElement) document.exitPointerLock();
-    marketOverlay.style.display = 'flex';
-    SKT()?.emit('market:getState');
-    renderMarketUI();
-    return;
-  }
+  if (nearATM)      { openMarket('bank');   return; }
+  if (nearTerminal) { openMarket('stocks'); return; }
   if (nearShadyGuy) {
     const saying = SHADY_SAYS[Math.floor(Math.random()*SHADY_SAYS.length)];
     NOTIFY(`Whiskers: ${saying}`);
-    return;
   }
 });
 
@@ -779,23 +786,25 @@ function tick(delta) {
   const cam = CAM(); if (!cam) return;
   const ud = S()?.userData;
 
+  const proximityRadius = isMobile ? 6 : 3.5;
+
   // ATM proximity
   if (ud?.atmPos) {
     const dx = cam.position.x - ud.atmPos.x;
     const dz = cam.position.z - ud.atmPos.z;
-    nearATM = Math.sqrt(dx*dx+dz*dz) < 3.5;
+    nearATM = Math.sqrt(dx*dx+dz*dz) < proximityRadius;
   }
   // Terminal proximity
   if (ud?.terminalPos) {
     const dx = cam.position.x - ud.terminalPos.x;
     const dz = cam.position.z - ud.terminalPos.z;
-    nearTerminal = Math.sqrt(dx*dx+dz*dz) < 3.5;
+    nearTerminal = Math.sqrt(dx*dx+dz*dz) < proximityRadius;
   }
   // Shady guy proximity
   if (ud?.shadyGuyPos) {
     const dx = cam.position.x - ud.shadyGuyPos.x;
     const dz = cam.position.z - ud.shadyGuyPos.z;
-    nearShadyGuy = Math.sqrt(dx*dx+dz*dz) < 3.5;
+    nearShadyGuy = Math.sqrt(dx*dx+dz*dz) < proximityRadius;
   }
 
   atmPrompt.style.display      = (!marketUIOpen && nearATM      && !nearTerminal) ? 'block' : 'none';
