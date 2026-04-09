@@ -1,5 +1,7 @@
 import * as THREE from 'three';
+window.THREE = THREE;
 import { Room, RoomEvent, Track } from 'livekit-client';
+window._LKRoom = Room; window._LKRoomEvent = RoomEvent; // expose for deepspace-client
 // Load Socket.io client — join screen works regardless of whether it loads
 let ioLoaded = false;
 const socketScript=document.createElement('script');
@@ -20,8 +22,8 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
+window._earthRenderer = renderer;
 
-// ─── CSS ──────────────────────────────────────────────────
 const styleTag = document.createElement('style');
 styleTag.textContent = `
   @keyframes rippleOut { from{transform:scale(0.1);opacity:0.9} to{transform:scale(2.2);opacity:0} }
@@ -49,7 +51,6 @@ document.addEventListener('gesturestart', e=>e.preventDefault(), {passive:false}
 document.addEventListener('gesturechange', e=>e.preventDefault(), {passive:false});
 document.addEventListener('wheel', e=>{ if(e.ctrlKey) e.preventDefault(); }, {passive:false});
 
-// ─── COORDINATE HUD ───────────────────────────────────────
 // ── COORD BAR (top center, slim) ──
 const coordHUD = document.createElement('div');
 coordHUD.style.cssText = `
@@ -141,7 +142,7 @@ let flyMode = false; // declared here so toggleFly can reference it
 const escHint = document.createElement('div');
 escHint.style.cssText=`position:fixed;top:10px;left:12px;background:rgba(0,0,0,0.55);
   color:rgba(255,255,255,0.55);font-family:sans-serif;font-size:11px;
-  padding:5px 11px;border-radius:20px;z-index:500;pointer-events:none;
+  padding:5px 11px;border-radius:20px;z-index:850;pointer-events:none;
   border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(6px);
   display:none;white-space:nowrap;`;
 escHint.textContent='ESC = free mouse';
@@ -152,7 +153,7 @@ document.body.appendChild(escHint);
 const clickHint = document.createElement('div');
 clickHint.style.cssText=`position:fixed;top:10px;left:12px;background:rgba(0,0,0,0.55);
   color:rgba(255,255,255,0.7);font-family:sans-serif;font-size:11px;
-  padding:5px 11px;border-radius:20px;z-index:500;pointer-events:none;
+  padding:5px 11px;border-radius:20px;z-index:850;pointer-events:none;
   border:1px solid rgba(255,255,255,0.2);backdrop-filter:blur(6px);
   display:none;white-space:nowrap;`;
 clickHint.textContent='🖱️ Click to look around';
@@ -183,7 +184,6 @@ function spawnRipple(x,y){
 }
 document.addEventListener('touchstart',e=>{for(const t of e.changedTouches)spawnRipple(t.clientX,t.clientY);},{passive:true});
 
-// ─── DIRECTION INDICATOR ──────────────────────────────────
 const dirRing=document.createElement('div');
 dirRing.style.cssText=`position:fixed;bottom:160px;left:40px;width:72px;height:72px;border-radius:50%;background:rgba(0,0,0,0.20);border:2px solid rgba(255,255,255,0.30);display:block;z-index:98;pointer-events:none;`;
 const dirDot=document.createElement('div');
@@ -199,9 +199,10 @@ function updateDirIndicator(dx,dz){
   dirDot.style.transform=`translate(calc(-50% + ${nx*m}px),calc(-50% + ${nz*m}px))`;
 }
 
-// ─── AUDIO ────────────────────────────────────────────────
 const audioCtx=new(window.AudioContext||window.webkitAudioContext)();
 const bgMusic=new Audio('/music.mp3'); bgMusic.loop=true; bgMusic.volume=0.35;
+window._bgMusic=bgMusic;
+window._earthMusicVolume=0.35;
 let musicStarted=false, musicMuted=false;
 function safeSetVolume(v){if(!musicMuted)bgMusic.volume=v;}
 document.addEventListener('click',()=>{
@@ -210,7 +211,7 @@ document.addEventListener('click',()=>{
 },{once:true});
 
 let lastStepTime=0;
-function playFootstep(){
+function playFootstep(){ if(window._playerZone==='space') return;
   const now=audioCtx.currentTime; if(now-lastStepTime<0.38)return; lastStepTime=now;
   const buf=audioCtx.createBuffer(1,audioCtx.sampleRate*0.06,audioCtx.sampleRate);
   const d=buf.getChannelData(0); for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*(1-i/d.length);
@@ -253,7 +254,6 @@ function createFountainSound(x,z){
   return{gain,x,z};
 }
 
-// ─── LIGHTING ─────────────────────────────────────────────
 const sun=new THREE.DirectionalLight(0xFFF4CC,2.2);
 sun.position.set(50,60,30); sun.castShadow=true;
 sun.shadow.mapSize.width=2048; sun.shadow.mapSize.height=2048;
@@ -268,7 +268,6 @@ sunGlow.position.copy(sunSphere.position); scene.add(sunGlow);
 scene.add(new THREE.AmbientLight(0xffffff,0.5));
 scene.add(new THREE.HemisphereLight(0x87CEEB,0x67C240,0.4));
 
-// ─── HELPERS ──────────────────────────────────────────────
 function makeMesh(geo,color,x,y,z,cast=true,emissive=null){
   const mat=new THREE.MeshLambertMaterial({color});
   if(emissive){mat.emissive=new THREE.Color(emissive);mat.emissiveIntensity=0.6;}
@@ -279,11 +278,9 @@ const box  =(w,h,d,c,x,y,z,cast=true,em=null)=>makeMesh(new THREE.BoxGeometry(w,
 const cyl  =(rt,rb,h,s,c,x,y,z,cast=true)=>makeMesh(new THREE.CylinderGeometry(rt,rb,h,s),c,x,y,z,cast);
 const cone =(r,h,s,c,x,y,z,cast=true)=>makeMesh(new THREE.ConeGeometry(r,h,s),c,x,y,z,cast);
 
-// ─── GROUND ───────────────────────────────────────────────
 const ground=new THREE.Mesh(new THREE.PlaneGeometry(400,400),new THREE.MeshLambertMaterial({color:0x67C240}));
 ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; scene.add(ground);
 
-// ─── CLOUDS ───────────────────────────────────────────────
 const clouds=[];
 function makeCloud(x,y,z){
   const g=new THREE.Group(),mat=new THREE.MeshLambertMaterial({color:0xFFFFFF});
@@ -297,7 +294,6 @@ makeCloud(-30,28,-20);makeCloud(10,32,-50);makeCloud(40,25,-30);
 makeCloud(-10,30,-70);makeCloud(20,35,-10);makeCloud(-50,27,-40);
 makeCloud(5,29,-90);makeCloud(60,31,-60);makeCloud(-20,33,-100);
 
-// ─── HILLS (pushed back behind spawn, terrain-following) ──
 // Hills are behind player (positive Z) so they don't interfere with campus
 const hillDefs = [
   {x:-25, z:22, s:1.0, c:0x78D44E},
@@ -325,14 +321,12 @@ function getTerrainY(px,pz){
   return Math.max(0,maxH);
 }
 
-// ─── ROADS ────────────────────────────────────────────────
 box(3,0.05,80,  0xD4C5A9, 0,0.01,-20,false);
 box(60,0.05,3,  0xD4C5A9, 0,0.01,-10,false);
 box(60,0.05,3,  0xD4C5A9, 0,0.01,-30,false);
 box(6,0.05,90,  0x888888, 34,0.02,-50,false);  // city road
 box(80,0.05,6,  0x888888, 20,0.02,-100,false); // far cross road
 
-// ─── BUILDING ZONES (tree exclusion) ──────────────────────
 const buildingZones=[
   {cx:-15,cz:-10,r:8},{cx:15,cz:-10,r:8},{cx:0,cz:-20,r:7},
   {cx:-16,cz:-28,r:9},
@@ -354,7 +348,6 @@ function onRoad(x,z){
   return false;
 }
 
-// ─── TREES ────────────────────────────────────────────────
 const treeColliders=[];
 function makeTree(x,z){
   if(tooCloseToBuilding(x,z)||onRoad(x,z))return;
@@ -369,7 +362,6 @@ function makeTree(x,z){
  [-20,-22],[-20,-35],[-20,-50],
  [-5,-38],[-5,-48],[5,-42],[5,-52]].forEach(([x,z])=>makeTree(x,z));
 
-// ─── COLLIDERS ────────────────────────────────────────────
 const colliders=[], circColliders=[], doors=[], golfBumpers=[];
 function addCollider(cx,cz,w,d){colliders.push({minX:cx-w/2,maxX:cx+w/2,minZ:cz-d/2,maxZ:cz+d/2});}
 
@@ -388,7 +380,6 @@ function makeDoor(x,y,z,rotY,label,roomId){
   doors.push({pos:new THREE.Vector3(x,y,z),label,roomId});
 }
 
-// ─── CAMPUS BUILDINGS ─────────────────────────────────────
 box(10,6,8,0xE8DCC8,-15,3,-10);box(11,0.5,9,0xC8B890,-15,6.3,-10);
 makeDoor(-15,1,-5.95,0,'The Lab','lab');addCollider(-15,-10,10,8);
 addRoof(-15,-10,10,8,6); // Lab roof at y=6
@@ -414,7 +405,6 @@ addRoof(-16,-28,12,10,4);
 
 // garage fully removed
 
-// ─── CITY BUILDINGS (street layout along x=34 road) ───────
 // Left side of road (x≈26), right side (x≈44)
 // Staggered along z so they feel like a real street
 const streetBuildings=[
@@ -475,7 +465,6 @@ box(1.5,0.06,90, 0xD8D0C0, 36,0.04,-50,false);
 // City lamps at x=37 on east sidewalk, arm facing road (west)
 [[37,-40],[37,-55],[37,-70],[37,-85]].forEach(([x,z])=>makeLampLeft(x,z));
 
-// ─── FLAGPOLES ────────────────────────────────────────────
 const flags=[];
 function makeFlagpole(x,z){
   cyl(0.05,0.05,8,6,0xCCCCCC,x,4,z);
@@ -486,7 +475,6 @@ function makeFlagpole(x,z){
 }
 [[-5,14],[5,14],[-8,5],[8,5]].forEach(([x,z])=>makeFlagpole(x,z));
 
-// ─── BENCHES ──────────────────────────────────────────────
 const benchSeats=[];
 function makeBench(x,z,rotY=0){
   const g=new THREE.Group();
@@ -502,7 +490,6 @@ function makeBench(x,z,rotY=0){
 }
 [[3,1],[-3,1],[3,-5,Math.PI],[-3,-5,Math.PI],[8,-10,-Math.PI/2],[-8,-10,Math.PI/2]].forEach(([x,z,r=0])=>makeBench(x,z,r));
 
-// ─── FOUNTAINS ────────────────────────────────────────────
 function makeFountain(x,z){
   cyl(2.5,2.8,0.5,12,0xC8C0B0,x,0.25,z);cyl(2.3,2.3,0.3,12,0x5599DD,x,0.55,z);
   cyl(0.2,0.3,1.5,8,0xC8C0B0,x,1,z);cyl(0.8,0.4,0.2,8,0xC8C0B0,x,1.85,z);
@@ -518,7 +505,6 @@ function makeFountain(x,z){
 makeFountain(0,-10);
 makeFountain(-6,-38);
 
-// ─── RAINBOW + POT OF GOLD ────────────────────────────────
 (function buildRainbow(){
   // Rainbow: a series of half-torus arcs in 7 colors
   // Spans from west of campus to east, arching high overhead
@@ -578,7 +564,6 @@ makeFountain(-6,-38);
   addCirc(potX, potZ, 2.0);
 })();
 
-// ─── BUTTERFLIES ──────────────────────────────────────────
 const butterflies=[];
 function makeButterfly(x,y,z){
   const g=new THREE.Group();
@@ -598,7 +583,6 @@ function makeButterfly(x,y,z){
 makeButterfly(3,1.5,-2);makeButterfly(-4,2,-5);makeButterfly(1,1.8,-12);
 makeButterfly(-2,2.2,-8);makeButterfly(6,1.6,-15);makeButterfly(-6,1.9,-18);
 
-// ─── KENNEDY SPACE CENTER ─────────────────────────────────
 // Located southwest of campus — visible from spawn
 const LC_X = -8, LC_Z = 28; // launch complex center
 
@@ -759,8 +743,74 @@ box(4.4,0.25,0.17,0xFFFFFF, LC_X-9,3.9,LC_Z-9, false);
 // Small NASA-style logo bar
 box(1.5,0.4,0.17,0xFF4400, LC_X-9,3.3,LC_Z-9, false);
 
+// ── GOLDEN TICKET VENDOR — COSMO ──────────────────────────────────
+const COSMO_X = LC_X + 3, COSMO_Z = LC_Z - 10;
+// Vendor counter
+box(2.2, 0.9, 1.0,  0x553300, COSMO_X, 0.45, COSMO_Z + 0.8,  false);
+box(2.4, 0.08, 1.2, 0xFFCC00, COSMO_X, 0.94, COSMO_Z + 0.8,  false); // gold top
+box(2.2, 1.4, 0.12, 0x111133, COSMO_X, 1.6,  COSMO_Z + 1.35, false); // back panel
+// Sign board
+box(2.0, 0.55, 0.1, 0x0a0820, COSMO_X, 2.5,  COSMO_Z + 1.38, false);
+box(1.9, 0.06, 0.12, 0xFFCC00, COSMO_X, 2.24, COSMO_Z + 1.38, false);
+box(1.9, 0.06, 0.12, 0xFFCC00, COSMO_X, 2.76, COSMO_Z + 1.38, false);
+// Golden tickets on display
+box(0.32, 0.5, 0.05, 0xFFDD00, COSMO_X - 0.65, 1.2,  COSMO_Z + 0.8, false);
+box(0.32, 0.5, 0.05, 0xFFDD00, COSMO_X + 0.65, 1.2,  COSMO_Z + 0.8, false);
+box(0.14, 0.07, 0.06, 0xFFFFAA, COSMO_X - 0.65, 1.36, COSMO_Z + 0.8, false);
+box(0.14, 0.07, 0.06, 0xFFFFAA, COSMO_X + 0.65, 1.36, COSMO_Z + 0.8, false);
+
+// Cosmo NPC — orange spacesuit, gold visor
+const cosmoGroup = new THREE.Group();
+const _cSuit  = new THREE.MeshLambertMaterial({ color: 0xFF6600 });
+const _cWhite = new THREE.MeshLambertMaterial({ color: 0xEEEEEE });
+const _cGold  = new THREE.MeshLambertMaterial({ color: 0xFFAA00 });
+const _cVisor = new THREE.MeshLambertMaterial({ color: 0xFFCC00 });
+// Boots
+const _cBoot0 = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.2,0.28),_cWhite); _cBoot0.position.set(-0.13,0.1,0); cosmoGroup.add(_cBoot0);
+const _cBoot1 = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.2,0.28),_cWhite); _cBoot1.position.set( 0.13,0.1,0); cosmoGroup.add(_cBoot1);
+// Legs
+const _cLeg0 = new THREE.Mesh(new THREE.BoxGeometry(0.2,0.5,0.22),_cSuit); _cLeg0.position.set(-0.13,0.47,0); cosmoGroup.add(_cLeg0);
+const _cLeg1 = new THREE.Mesh(new THREE.BoxGeometry(0.2,0.5,0.22),_cSuit); _cLeg1.position.set( 0.13,0.47,0); cosmoGroup.add(_cLeg1);
+// Body
+const _cBody = new THREE.Mesh(new THREE.BoxGeometry(0.58,0.6,0.4),_cSuit); _cBody.position.set(0,0.92,0); cosmoGroup.add(_cBody);
+// Life support backpack
+const _cPack = new THREE.Mesh(new THREE.BoxGeometry(0.4,0.46,0.16),_cWhite); _cPack.position.set(0,0.95,-0.27); cosmoGroup.add(_cPack);
+const _cPackStripe = new THREE.Mesh(new THREE.BoxGeometry(0.42,0.07,0.18),_cGold); _cPackStripe.position.set(0,1.05,-0.27); cosmoGroup.add(_cPackStripe);
+// Chest panel
+const _cChest = new THREE.Mesh(new THREE.BoxGeometry(0.26,0.2,0.05),_cGold); _cChest.position.set(0,0.98,0.21); cosmoGroup.add(_cChest);
+// Arms + elbow rings + gloves
+[-0.38, 0.38].forEach(ax => {
+  const _arm = new THREE.Mesh(new THREE.BoxGeometry(0.18,0.48,0.2),_cSuit);  _arm.position.set(ax,0.84,0);  cosmoGroup.add(_arm);
+  const _ring= new THREE.Mesh(new THREE.BoxGeometry(0.2,0.06,0.22),_cGold);  _ring.position.set(ax,0.65,0); cosmoGroup.add(_ring);
+  const _glv = new THREE.Mesh(new THREE.BoxGeometry(0.17,0.17,0.17),_cWhite);_glv.position.set(ax,0.54,0);  cosmoGroup.add(_glv);
+});
+// Helmet
+const _cHelm   = new THREE.Mesh(new THREE.BoxGeometry(0.52,0.5,0.5),_cWhite);  _cHelm.position.set(0,1.44,0);   cosmoGroup.add(_cHelm);
+// Gold visor
+const _cVisorM = new THREE.Mesh(new THREE.BoxGeometry(0.34,0.22,0.05),_cVisor); _cVisorM.position.set(0,1.46,0.26); cosmoGroup.add(_cVisorM);
+// Collar ring
+const _cCollar = new THREE.Mesh(new THREE.BoxGeometry(0.58,0.07,0.46),_cGold);  _cCollar.position.set(0,1.22,0);  cosmoGroup.add(_cCollar);
+// Antenna + blinking tip
+const _cAnt = new THREE.Mesh(new THREE.CylinderGeometry(0.02,0.02,0.3,6),_cGold); _cAnt.position.set(0.2,1.74,0); cosmoGroup.add(_cAnt);
+const _cTip = new THREE.Mesh(new THREE.SphereGeometry(0.04,6,6), new THREE.MeshBasicMaterial({color:0xFF4400})); _cTip.position.set(0.2,1.91,0); cosmoGroup.add(_cTip);
+
+cosmoGroup.position.set(COSMO_X, 0, COSMO_Z - 0.2);
+cosmoGroup.rotation.y = Math.PI; // faces south toward approaching player
+scene.add(cosmoGroup);
+let _cosmoT = 0;
+function updateCosmo(delta) {
+  if (window._inStation || window._spaceOverride || window._inSanctum) return;
+  _cosmoT += delta;
+  cosmoGroup.position.y = Math.sin(_cosmoT * 1.1) * 0.05;
+  cosmoGroup.rotation.y = Math.PI + Math.sin(_cosmoT * 0.5) * 0.3;
+  // Antenna tip blink
+  _cTip.material.color.setHex(_cosmoT % 1 < 0.5 ? 0xFF4400 : 0xFF9900);
+}
+
 // ── LAUNCH STATE ──
 let rocketLaunching = false;
+const GTV_PRICE = 300_000_000_000_000;
+let nearGoldenTicket = false;
 let rocketY = 7.5;
 let rocketVel = 0;
 let launchParticles = [];
@@ -770,6 +820,14 @@ let rocketDone = false;
 function setupRocketSocket(){
   if(!socket) return;
   socket.on('rocket:launch',()=>{ launchRocket(); });
+  socket.on('space:goldenTicketGranted',()=>{
+    const ov=document.getElementById('goldenTicketOverlay');
+    if(ov) ov.remove();
+    inRoom=false;
+    launchRocket();
+    showNotification('🚀 Launching in 3 seconds...');
+    setTimeout(()=>{ window.enterSpace(); }, 3000);
+  });
 }
 const _rocketPoll=setInterval(()=>{ if(socket&&mySocketId){ setupRocketSocket(); clearInterval(_rocketPoll); }},1000);
 
@@ -855,7 +913,6 @@ function updateRocket(delta,totalTime){
   }
 }
 
-// ─── THE ASTROPELION LOUNGE ───────────────────────────────
 const LX=58, LZ=28; // lounge center
 const FLOOR1_Y=0.3;  // ground floor slab top
 const FLOOR2_Y=5.5;  // upper deck floor top
@@ -1125,7 +1182,6 @@ function updateRobots(delta,totalTime){
 // Add lounge to door prompts area (nearHost handled in update)
 doors.push({pos:{x:LX,z:LZ+10.5},roomId:'lounge',label:'The Lounge'});
 
-// ─── WISHING SYSTEM ───────────────────────────────────────
 let hasCoin = false;
 let nearPot = false;
 let nearFountain = false;
@@ -1303,7 +1359,6 @@ function doWishSequence() {
   }, 400);
 }
 
-// ─── TUBE RIDE ────────────────────────────────────────────
 const SLIDE_X=22, SLIDE_Z=18; // southeast of spawn, visible immediately
 
 // Slide path — designed for 15 seconds of glory
@@ -1421,7 +1476,6 @@ box(5.4,0.3,0.22,0xFFFFFF,SLIDE_X,6.15,SLIDE_Z-3,false);
 box(0.3,1.2,0.22,0xFFFF00,SLIDE_X,3.8,SLIDE_Z-3,false);
 box(0.8,0.5,0.22,0xFFFF00,SLIDE_X,4.7,SLIDE_Z-3,false);
 
-// ── RIDER BODY (visible character that slides down) ──────
 const riderGroup = new THREE.Group();
 // Torso
 const riderTorso = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.6,0.35),
@@ -1509,7 +1563,6 @@ function exitSlide(){
   spawnSplash();
 }
 
-// ─── FARM ANIMALS ─────────────────────────────────────────
 const animals = [];
 const helloTexts = {
   cow:     ['Moooo! 🐄','Howdy partner! 🤠','Got milk? 😎','MOO means hello!'],
@@ -1711,7 +1764,6 @@ function updateAnimals(delta, totalTime) {
   });
 }
 
-// ─── CLAUDE THE OCTOPUS ───────────────────────────────────
 (function buildClaude(){
   const g = new THREE.Group();
   const orange  = new THREE.MeshLambertMaterial({color:0xFF7A45});
@@ -1887,7 +1939,6 @@ function openClaudeChat() {
   },50);
 }
 
-// ─── BLIMP ────────────────────────────────────────────────
 const blimpGroup=new THREE.Group();
 const envMat=new THREE.MeshLambertMaterial({color:0x2255CC});
 const envelope=new THREE.Mesh(new THREE.SphereGeometry(3,12,8),envMat);
@@ -1939,7 +1990,6 @@ function makeCatFace(zDir){
 makeCatFace(1);makeCatFace(-1);
 blimpGroup.position.set(0,22,-15);scene.add(blimpGroup);
 
-// ─── MINI GOLF ────────────────────────────────────────────
 const GOLF_CX=-47, GOLF_CZ=-20;
 const golfHoles=[
   {tee:{x:-36,z:-6},  cup:{x:-44,z:-10},par:2},
@@ -2294,7 +2344,6 @@ renderer.domElement.addEventListener('touchend',e=>{
   }
 },{passive:true});
 
-// ─── FIREWORKS ────────────────────────────────────────────
 const fireworkParticles=[];
 let fireworksActive=true,fireworkTimer=0,fireworkBurstCount=0;
 function launchFirework(){
@@ -2312,7 +2361,6 @@ function launchFirework(){
   playFireworkBoom(150+Math.random()*200);
 }
 
-// ─── ARMS ─────────────────────────────────────────────────
 function makeArm(side){
   const g=new THREE.Group(),skin=0xF5CBA7;
   const add=(geo,px,py,pz)=>{const m=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color:skin}));m.position.set(px,py,pz);g.add(m);};
@@ -2327,7 +2375,6 @@ leftArm.position.set(-0.27,-0.3,-0.15);
 rightArm.position.set(0.27,-0.3,-0.15);
 camera.add(leftArm);camera.add(rightArm);scene.add(camera);
 
-// ─── ROOMS ────────────────────────────────────────────────
 const linkStyle=`background:rgba(255,255,255,0.07);border:1px solid currentColor;border-radius:10px;padding:14px 18px;color:inherit;text-decoration:none;display:block;margin-bottom:10px;`;
 const rooms={
   lab:{color:'#0a0a1a',textColor:'#00FFCC',content:`<div style="text-align:center;padding:40px;max-width:720px;margin:0 auto;">
@@ -2408,10 +2455,11 @@ function exitRoom(){
 }
 exitBtn.addEventListener('click',exitRoom);
 
-const doorPrompt=document.createElement('div');
+const doorPrompt=document.createElement("div"); window._doorPrompt=doorPrompt;
 doorPrompt.style.cssText=`position:fixed;bottom:140px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.65);color:white;padding:12px 28px;border-radius:12px;font-family:sans-serif;font-size:15px;border:1px solid rgba(255,255,255,0.3);backdrop-filter:blur(8px);display:none;z-index:100;cursor:pointer;user-select:none;active:opacity:0.7;`;
 // Tapping the prompt fires the same action as pressing E
 function fireInteract(){
+  if(window._ddsActive||window._inSanctum) return; // block earth interact in other zones
   // Will relock after interact unless a UI opens
   let willOpenUI=false;
   // Always release pointer lock so cursor is available for any UI
@@ -2423,6 +2471,7 @@ function fireInteract(){
     if(p) showPlayerMenu(nearestPlayerId, window.innerWidth/2, window.innerHeight/2);
     return;
   }
+  if(nearGoldenTicket){ openGoldenTicketVendor(); return; }
   if(nearCosmeticShop){ openCosmeticShop(); return; }
   if(nearPetShop){ openPetShop(); return; }
   if(nearLeaderboard){ openLeaderboard(); return; }
@@ -2434,7 +2483,8 @@ function fireInteract(){
   else if(nearPot&&!hasCoin)        { hasCoin=true; coinIndicator.style.display='block'; doorPrompt.style.display='none'; }
   else if(nearFountain&&hasCoin)    doWishSequence();
   else if(nearFountain&&!hasCoin)   showRainbowMsg();
-  else if(nearClaude)               openClaudeChat();
+  else if(window._nearStationDoor&&window._playerZone==='station'){ window._nearStationDoor.action(); window._nearStationDoor=null; return; }
+    if(nearClaude)               openClaudeChat();
   else if(nearDoor&&!isSitting)     enterRoom(nearDoor.roomId);
   else if(nearBench&&!isSitting)    sitDown(nearBench);
   else if(isSitting)                standUp();
@@ -2444,7 +2494,6 @@ doorPrompt.addEventListener('touchend', e=>{ e.preventDefault(); fireInteract();
 doorPrompt.addEventListener('click', ()=>fireInteract());
 document.body.appendChild(doorPrompt);
 
-// ─── MUSIC CONTROL ────────────────────────────────────────
 let lastTapTime=0,volPanelOpen=false;
 const musicBtn=document.createElement('div');
 musicBtn.innerHTML='🎵';
@@ -2556,7 +2605,6 @@ musicBtn.addEventListener('click',()=>{
   lastTapTime=now;
 });
 
-// ─── PHYSICS / INPUT ──────────────────────────────────────
 let velocityY=0,isGrounded=true;
 const GRAVITY=20,JUMP_FORCE=9,GROUND_Y=1.7;
 const keys={};
@@ -2582,7 +2630,7 @@ document.addEventListener('keydown',e=>{
     if(golfMode&&!ballInMotion&&!e.repeat&&!powerCharging){ powerCharging=true; powerAmount=0; powerBar.style.display='block'; powerLabel.style.display='block'; }
     else if(isGrounded&&!inRoom&&!isSitting){velocityY=JUMP_FORCE;isGrounded=false;}
   }
-  if(e.code==='KeyE') fireInteract();
+  if(e.code==="KeyE"&&!window._inStation&&!window._inSanctum&&!window._ddsActive) fireInteract();
   if(e.code==='KeyF'&&!inRoom&&!golfMode){ toggleFly(); }
   if(e.code==='Escape'){
     if(claudeOverlay.style.display==='flex'){claudeOverlay.style.display='none';inRoom=false;safeSetVolume(0.35);}
@@ -2614,7 +2662,7 @@ function sitDown(bench){
   camera.position.copy(bench.eyePos);
   yaw=bench.rotY+Math.PI;pitch=0;
   leftArm.visible=false;rightArm.visible=false;
-  doorPrompt.textContent='Press E or tap to stand up';doorPrompt.style.display='block';
+  doorPrompt.textContent='Press E or tap to stand up';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');
   if(document.pointerLockElement)document.exitPointerLock();
 }
 function standUp(){
@@ -2641,7 +2689,7 @@ renderer.domElement.addEventListener('touchstart',e=>{
 },{passive:true});
 renderer.domElement.addEventListener('touchmove',e=>{
   for(const t of e.changedTouches){
-    if(t.identifier===joystick.id){joystick.dx=(t.clientX-joystick.startX)/50;joystick.dy=(t.clientY-joystick.startY)/50;}
+    if(t.identifier===joystick.id){joystick.dx=(t.clientX-joystick.startX)/50;joystick.dy=(t.clientY-joystick.startY)/50;window._joystickDelta={x:joystick.dx,y:joystick.dy};}
     if(t.identifier===lookTouch.id){
       yaw-=(t.clientX-lookTouch.startX)*0.007;pitch-=(t.clientY-lookTouch.startY)*0.005;
       pitch=Math.max(-Math.PI/3,Math.min(Math.PI/3,pitch));
@@ -2651,14 +2699,14 @@ renderer.domElement.addEventListener('touchmove',e=>{
 },{passive:true});
 renderer.domElement.addEventListener('touchend',e=>{
   for(const t of e.changedTouches){
-    if(t.identifier===joystick.id)joystick={active:false,dx:0,dy:0,id:null};
+    if(t.identifier===joystick.id){joystick={active:false,dx:0,dy:0,id:null};window._joystickDelta={x:0,y:0};}
     if(t.identifier===lookTouch.id)lookTouch={active:false,id:null};
   }
 },{passive:true});
 
 const jumpBtn=document.createElement('div');
 jumpBtn.innerHTML='⬆';
-jumpBtn.style.cssText=`position:fixed;bottom:100px;right:20px;width:60px;height:60px;background:rgba(255,255,255,0.2);border:2px solid rgba(255,255,255,0.5);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:26px;color:white;user-select:none;z-index:100;backdrop-filter:blur(4px);`;
+jumpBtn.style.cssText=`position:fixed;bottom:100px;right:20px;width:60px;height:60px;background:rgba(255,255,255,0.2);border:2px solid rgba(255,255,255,0.5);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:26px;color:white;user-select:none;z-index:100;backdrop-filter:blur(4px);cursor:pointer;`;
 jumpBtn.addEventListener('touchstart',e=>{
   e.preventDefault();
   if(nearLadder){
@@ -2670,6 +2718,7 @@ jumpBtn.addEventListener('touchstart',e=>{
     velocityY=JUMP_FORCE; isGrounded=false;
   }
 },{passive:false});
+jumpBtn.addEventListener("click",()=>{if(isGrounded&&!inRoom&&!isSitting){velocityY=JUMP_FORCE;isGrounded=false;}});
 document.body.appendChild(jumpBtn);
 
 // ── CHAT BUTTON (mobile) ──
@@ -2843,7 +2892,6 @@ setTimeout(()=>{
   });
 },200);
 
-// ─── TELEPORT MENU ────────────────────────────────────────
 const destinations={
   '🌊 Water Slide':{x:SLIDE_X, z:SLIDE_Z, y:towerH+1.7, onTop:true},
   'Campus Entrance':{x:0,z:8},
@@ -2877,8 +2925,8 @@ menuBtn.style.cssText=`position:fixed;bottom:20px;right:20px;padding:10px 18px;b
 let menuOpen=false;
 menuBtn.addEventListener('click',()=>{menuOpen=!menuOpen;menuList.style.display=menuOpen?'block':'none';});
 document.body.appendChild(menuList);document.body.appendChild(menuBtn);
+window._earthPlacesMenuList=menuList; window._earthPlacesBtn=menuBtn; window._closePlacesMenu=()=>{menuList.style.display='none';menuOpen=false;};
 
-// ─── COLLISION ────────────────────────────────────────────
 const PLAYER_RADIUS=0.5;
 function resolveCollision(pos){
   for(const c of colliders){
@@ -2901,7 +2949,6 @@ function resolveCollision(pos){
   }
 }
 
-// ─── UPDATE ───────────────────────────────────────────────
 const moveDir=new THREE.Vector3();
 const clock=new THREE.Clock();
 let armBob=0,totalTime=0,blimpAngle=0;
@@ -2993,6 +3040,7 @@ function update(){
     updateRobots(delta,totalTime);
     updateLounge(delta,totalTime);
     updateRocket(delta,totalTime);
+    if(window._updateTicketVendor) window._updateTicketVendor(camera.position.x, camera.position.z);
     // Broadcast slide position so other players can see us on the tube
     if(socket&&mySocketId&&slideMode){
       posUpdateTimer+=delta;
@@ -3165,9 +3213,9 @@ function update(){
     b.lWing.rotation.y=flap;b.rWing.rotation.y=-flap;
   });
   scene.children.forEach(obj=>{if(obj.userData.isFountainDrop)obj.position.y=2.2+Math.sin(totalTime*4+obj.userData.fountainPhase*Math.PI*2)*0.15;});
-  fountainSounds.forEach(fs=>{const dx=camera.position.x-fs.x,dz=camera.position.z-fs.z;fs.gain.gain.value=Math.max(0,0.10-Math.sqrt(dx*dx+dz*dz)*0.012);});
+  if(!window._inStation&&!window._inSanctum) fountainSounds.forEach(fs=>{const dx=camera.position.x-fs.x,dz=camera.position.z-fs.z;fs.gain.gain.value=Math.max(0,0.10-Math.sqrt(dx*dx+dz*dz)*0.012);});
   animBlimp();
-  updateAnimals(delta, totalTime);
+  if(!window._inStation&&!window._inSanctum) updateAnimals(delta, totalTime);
   updateRocket(delta, totalTime);
 
   nearDoor=null;let closestDoor=3.5;
@@ -3196,7 +3244,7 @@ function update(){
      window.claudeGroup.position.y=Math.sin(totalTime*1.2)*0.06;
      if(window.claudeUmbrella) window.claudeUmbrella.rotation.y=totalTime*0.4;
      if(window.claudeBubble){
-       if(nearClaude&&!inRoom){
+       if(nearClaude&&!inRoom&&!window._inStation){
          const wp=new THREE.Vector3(-10,2.4,-3.5);
          const proj=wp.clone().project(camera);
          const sx=(proj.x*0.5+0.5)*window.innerWidth;
@@ -3235,24 +3283,25 @@ function update(){
     });
   }
 
-  if(!isSitting&&!golfMode){
-    if(nearSlide&&!slideMode)        {doorPrompt.textContent='🌊 Press E to RIDE! 🌊';doorPrompt.style.display='block';}
-    else if(nearPoker)               {doorPrompt.textContent='Press E to play poker 🃏';doorPrompt.style.display='block';}
-    else if(nearLadder&&!nearSlide)  {doorPrompt.textContent='Push joystick forward or tap ⬆ to climb';doorPrompt.style.display='block';}
-    else if(nearPot&&!hasCoin)       {doorPrompt.textContent='Press E to pick up a coin 🪙';doorPrompt.style.display='block';}
-    else if(nearFountain&&hasCoin)   {doorPrompt.textContent='Press E to toss coin & make a wish ✨';doorPrompt.style.display='block';}
-    else if(nearFountain&&!hasCoin)  {doorPrompt.textContent='Press E to approach the fountain';doorPrompt.style.display='block';}
-    else if(nearCosmeticShop)       {doorPrompt.textContent='Press E for Boutique ✨';doorPrompt.style.display='block';}
-    else if(nearPetShop)            {doorPrompt.textContent='Press E for Pet Shop 🐾';doorPrompt.style.display='block';}
-    else if(nearLeaderboard)          {doorPrompt.textContent='Press E to view leaderboard 🏆';doorPrompt.style.display='block';}
-    else if(nearSlotMachine)         {doorPrompt.textContent='Press E to play slots 🎰';doorPrompt.style.display='block';}
-    else if(nearRaffleVendor)        {doorPrompt.textContent='Press E to buy raffle ticket 🎫';doorPrompt.style.display='block';}
-    else if(nearHost)                {doorPrompt.textContent='Press E to be seated 🎩';doorPrompt.style.display='block';}
-    else if(nearClaude)              {doorPrompt.textContent='Press E to talk to Claude 🐙';doorPrompt.style.display='block';}
-    else if(nearDoor)                {doorPrompt.textContent='Press E or tap to enter '+nearDoor.label;doorPrompt.style.display='block';}
-    else if(nearBench)               {doorPrompt.textContent='Press E or tap to sit';doorPrompt.style.display='block';}
-    else if(nearTee!==null&&!mpGolf.active) {doorPrompt.textContent='Press E to play Hole '+(nearTee+1);doorPrompt.style.display='block';}
-    else if(nearestPlayerId)         {doorPrompt.textContent='Press E to interact with player 👤';doorPrompt.style.display='block';}
+  if(!isSitting&&!golfMode&&!window._inStation&&!window._inSanctum){
+    if(nearSlide&&!slideMode)        {doorPrompt.textContent='🌊 Press E to RIDE! 🌊';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearPoker)               {doorPrompt.textContent='Press E to play poker 🃏';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearLadder&&!nearSlide)  {doorPrompt.textContent='Push joystick forward or tap ⬆ to climb';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearPot&&!hasCoin)       {doorPrompt.textContent='Press E to pick up a coin 🪙';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearFountain&&hasCoin)   {doorPrompt.textContent='Press E to toss coin & make a wish ✨';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearFountain&&!hasCoin)  {doorPrompt.textContent='Press E to approach the fountain';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearGoldenTicket)       {doorPrompt.textContent='🎟️ Press E — Cosmo\'s Golden Tickets';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearCosmeticShop)       {doorPrompt.textContent='Press E for Boutique ✨';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearPetShop)            {doorPrompt.textContent='Press E for Pet Shop 🐾';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearLeaderboard)          {doorPrompt.textContent='Press E to view leaderboard 🏆';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearSlotMachine)         {doorPrompt.textContent='Press E to play slots 🎰';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearRaffleVendor)        {doorPrompt.textContent='Press E to buy raffle ticket 🎫';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearHost)                {doorPrompt.textContent='Press E to be seated 🎩';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearClaude)              {doorPrompt.textContent='Press E to talk to Claude 🐙';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearDoor)                {doorPrompt.textContent='Press E or tap to enter '+nearDoor.label;(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearBench)               {doorPrompt.textContent='Press E or tap to sit';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearTee!==null&&!mpGolf.active) {doorPrompt.textContent='Press E to play Hole '+(nearTee+1);(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
+    else if(nearestPlayerId)         {doorPrompt.textContent='Press E to interact with player 👤';(!window._ddsActive&&!window._inSanctum)&&(doorPrompt.style.display='block');}
     else                             {doorPrompt.style.display='none';}
   }
   // ── MULTIPLAYER UPDATES ──
@@ -3263,7 +3312,7 @@ function update(){
   }
   if(myChatTimer>0){ myChatTimer-=delta; if(myChatTimer<=0) myChatBubble.style.display='none'; }
   updateRemotePlayers(delta, totalTime);
-  updateRobots(delta, totalTime);
+  if(!window._inStation&&!window._inSanctum) updateRobots(delta, totalTime);
   updateLounge(delta, totalTime);
   updatePet(delta, totalTime);
   updateNimbus(delta, totalTime);
@@ -3279,11 +3328,14 @@ function update(){
   // Near poker table
   {const pdx=camera.position.x-(-16),pdz=camera.position.z-(-28);
    nearPoker=Math.sqrt(pdx*pdx+pdz*pdz)<4;}
+  // Near golden ticket vendor
+  {const gtx=camera.position.x-COSMO_X, gtz=camera.position.z-COSMO_Z;
+   nearGoldenTicket=!window._spaceOverride&&!window._inStation&&Math.sqrt(gtx*gtx+gtz*gtz)<3;}
+  updateCosmo(delta);
 }
 
 window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);});
 
-// ─── TERMS OF SERVICE ─────────────────────────────────────
 const tosAccepted = localStorage.getItem('aplabs_tos_v1') === 'yes';
 const tosOverlay = document.createElement('div');
 tosOverlay.style.cssText=`position:fixed;inset:0;background:rgba(0,5,15,0.98);
@@ -3545,6 +3597,11 @@ function updateRemotePlayers(delta, totalTime) {
     const legs = p.group.children.filter((_,i)=>i===8||i===9);
     legs.forEach((l,i)=>{ if(l) l.rotation.x = Math.sin(p.legPhase+(i*Math.PI))*0.3; });
 
+    // Hide nametag completely when not on earth
+    if (window._inStation || window._spaceOverride) {
+      p.nameTag.style.display = 'none';
+      return;
+    }
     // Distance check — hide nametag beyond 30 units
     const dx=camera.position.x-p.group.position.x;
     const dz=camera.position.z-p.group.position.z;
@@ -3591,7 +3648,7 @@ function sendPosition() {
   const dy=Math.abs(camera.position.y-lastSentY);
   const dyaw=Math.abs(yaw-lastSentRotY);
   if(Math.sqrt(dx*dx+dz*dz)>0.05||dyaw>0.04||dy>0.05){
-    socket.emit('player:move',{x:camera.position.x,y:camera.position.y,z:camera.position.z,rotY:yaw});
+    if(!window._inStation&&!window._spaceOverride&&!window._inSanctum) socket.emit("player:move",{x:camera.position.x,y:camera.position.y,z:camera.position.z,rotY:yaw});
     lastSentX=camera.position.x; lastSentZ=camera.position.z;
     lastSentRotY=yaw; lastSentY=camera.position.y;
   }
@@ -3616,6 +3673,70 @@ chatBox.innerHTML=`
   </div>
 `;
 document.body.appendChild(chatBox);
+
+// ── ADMIN COMMAND AUTOCOMPLETE ────────────────────────────────────────────────
+const _ADMIN_CMDS = [
+  { cmd:'/devchips',   fmt:'/devchips',                    desc:'Max chips for yourself' },
+  { cmd:'/unlock',     fmt:'/unlock',                       desc:'Unlock all areas for yourself' },
+  { cmd:'/god',        fmt:'/god',                          desc:'Toggle invincibility' },
+  { cmd:'/speed',      fmt:'/speed <multiplier>',           desc:'Set movement speed (e.g. 3)' },
+  { cmd:'/list',       fmt:'/list',                         desc:'Show all online players' },
+  { cmd:'/kick',       fmt:'/kick <username>',              desc:'Disconnect a player' },
+  { cmd:'/goto',       fmt:'/goto <username>',              desc:'See what zone player is in' },
+  { cmd:'/give chips', fmt:'/give chips <user> <amount>',   desc:'Give chips to player' },
+  { cmd:'/give bars',  fmt:'/give bars <user> <amount>',    desc:'Give gold bars to player' },
+  { cmd:'/give research', fmt:'/give research <user> <lvl>',desc:'Set research level' },
+  { cmd:'/give space', fmt:'/give space <user>',            desc:'Unlock space for player' },
+  { cmd:'/give sanctum',fmt:'/give sanctum <user>',         desc:'Unlock sanctum for player' },
+  { cmd:'/give dm',       fmt:'/give dm <user> <amount>',       desc:'Give sanctum DM to player' },
+  { cmd:'/give earthbars', fmt:'/give earthbars <user> <amount>', desc:'Give earth mining bars' },
+  { cmd:'/give ore',       fmt:'/give ore <user> <amount>',       desc:'Give earth ore' },
+  { cmd:'/give wrench',    fmt:'/give wrench <user>',             desc:'Give mining wrench' },
+  { cmd:'/give wol',       fmt:'/give wol <user> <amount>',       desc:'Give Water of Life' },
+  { cmd:'/help',       fmt:'/help',                         desc:'Show all commands' },
+];
+var _adminHintEl = null;
+function _buildAdminHint() {
+  if (_adminHintEl) return;
+  _adminHintEl = document.createElement('div');
+  _adminHintEl.id = 'adminCmdHint';
+  _adminHintEl.style.cssText = 'position:fixed;bottom:365px;left:50%;transform:translateX(-50%);'
+    +'background:rgba(0,6,18,0.96);border:1px solid #00FFB8;border-radius:10px;'
+    +'padding:8px 14px;z-index:201;display:none;min-width:320px;max-width:420px;'
+    +'font-family:Courier New,monospace;font-size:11px;color:#00FFB8;'
+    +'box-shadow:0 0 18px #00FFB822;';
+  document.body.appendChild(_adminHintEl);
+}
+function _updateAdminHint(val) {
+  if (!window._myUsername || window._myUsername !== 'APLABSADMIN') return;
+  _buildAdminHint();
+  if (!val.startsWith('/')) { _adminHintEl.style.display='none'; return; }
+  var matches = _ADMIN_CMDS.filter(function(c){ return c.cmd.startsWith(val.toLowerCase()); });
+  if (!matches.length) { _adminHintEl.style.display='none'; return; }
+  _adminHintEl.innerHTML = matches.map(function(c){
+    return '<div style="padding:3px 0;border-bottom:1px solid rgba(0,255,184,0.1);">'
+      +'<span style="color:#FFFFFF;font-weight:bold;">'+c.fmt+'</span>'
+      +' <span style="color:#888;font-size:10px;">— '+c.desc+'</span></div>';
+  }).join('');
+  _adminHintEl.style.display = 'block';
+}
+setTimeout(function(){
+  var _ci = document.getElementById('chatInput');
+  if (_ci) {
+    _ci.addEventListener('input', function(){ _updateAdminHint(_ci.value); });
+    _ci.addEventListener('keydown', function(e){
+      if (e.key==='Escape' && _adminHintEl) _adminHintEl.style.display='none';
+    });
+  }
+}, 200);
+// Hide hint when chat closes
+var _origSendChat = sendChatMsg;
+sendChatMsg = function(){
+  if (_adminHintEl) _adminHintEl.style.display='none';
+  _origSendChat();
+};
+// ── END ADMIN AUTOCOMPLETE ────────────────────────────────────────────────────
+
 let chatOpen=false;
 
 function sendChatMsg(){
@@ -3669,9 +3790,11 @@ const SHIRT_COLORS=['#FF4488','#4488FF','#44FF88','#FFAA22','#CC44FF','#FF4422',
 
 joinOverlay.innerHTML=`
   <div style="max-width:460px;padding:32px 28px;text-align:center;">
+    <div style="display:inline-block;background:linear-gradient(90deg,#FF4400,#FF8800);color:#fff;font-size:0.72rem;font-weight:bold;letter-spacing:0.18em;padding:5px 16px;border-radius:20px;margin-bottom:14px;">🚀 THE SPACE AGE UPDATE — LIVE NOW</div>
     <div style="font-size:2.2rem;font-weight:bold;margin-bottom:6px;">Welcome to Astropelion Labs</div>
     <div style="opacity:0.6;font-size:1rem;margin-bottom:4px;color:#FF7A45;">Forefront of the Future.</div>
-    <div style="opacity:0.4;font-size:0.85rem;margin-bottom:24px;">Pick your look, then explore</div>
+    <div style="opacity:0.4;font-size:0.85rem;margin-bottom:10px;">Pick your look, then explore</div>
+    <div style="background:rgba(255,200,50,0.08);border:1px solid rgba(255,200,50,0.25);border-radius:10px;padding:8px 16px;margin-bottom:18px;font-size:0.78rem;color:rgba(255,220,100,0.75);letter-spacing:0.05em;">✦ Earn <b style="color:#FFDD44;">300T $</b> on Earth to unlock deep space</div>
     <div style="margin-bottom:18px;">
       <input id="usernameInput" maxlength="20" placeholder="Your name..."
         style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.25);
@@ -3740,7 +3863,7 @@ setTimeout(()=>{
   document.getElementById('joinBtn').addEventListener('click',()=>{
     const name=(document.getElementById('usernameInput').value.trim()||'Visitor').substring(0,20);
     const pass=(document.getElementById('passwordInput')?.value.trim()||'');
-    myUsername=name; myAnimal=selectedAnimal; myHat=selectedHat; myShirtColor=selectedColor;
+    myUsername=name; myAnimal=selectedAnimal; myHat=selectedHat; myShirtColor=selectedColor; window._myUsername=name;
     loadFriends(); // load this user's friends after username is known
     joinOverlay.style.display='none';
     connectMultiplayer(pass);
@@ -3764,14 +3887,32 @@ function connectMultiplayer(password=''){
       showNotification(`Connected as ${myUsername} 🎉`);
     });
 
+    socket.on('admin:msg',(d)=>{
+      // multi-line admin messages
+      var lines=d.msg.split('\n');
+      lines.forEach(function(l){ showNotification(l); });
+    });
+    socket.on('admin:kicked',(d)=>{ showNotification(d.msg||'Kicked.'); setTimeout(()=>location.reload(),1500); });
+    socket.on('admin:god',(d)=>{ window._adminGodMode=d.enabled; showNotification('God mode: '+(d.enabled?'ON':'OFF')); });
+    socket.on('admin:speed',(d)=>{ window._adminSpeedMult=d.speed||1; showNotification('Speed: '+d.speed+'x'); });
+    socket.on('admin:goto',(d)=>{
+      if(d.zone==='earth'){ showNotification('Teleporting to earth...'); }
+      else { showNotification('Target is in zone: '+d.zone+' — warp there manually'); }
+    });
+    socket.on('admin:msg',(d)=>{ d.msg.split('\n').forEach(l=>showNotification(l)); });
+    socket.on('admin:kicked',(d)=>{ showNotification(d.msg||'Kicked.'); setTimeout(()=>location.reload(),1500); });
+    socket.on('admin:god',(d)=>{ window._adminGodMode=d.enabled; showNotification('🛡️ God mode: '+(d.enabled?'ON':'OFF')); });
+    socket.on('admin:speed',(d)=>{ window._adminSpeedMult=d.speed||1; showNotification('⚡ Speed: '+d.speed+'x'); });
+    socket.on('admin:goto',(d)=>{ showNotification('📍 Target zone: '+d.zone); });
     socket.on('chips:update',(data)=>{
       const prev=window.myChips||1000;
       window.myChips=data.chips;
+      window._myChips=data.chips; // sync for station singularity tab
       const diff=data.chips-prev;
       if(diff!==0){
         const walletEl=document.getElementById('walletAmount');
         if(walletEl){
-          walletEl.textContent=data.chips.toLocaleString();
+          walletEl.textContent=fmtSB(data.chips);
           walletEl.style.animation='none';
           walletEl.style.color=diff>0?'#88FF44':'#FF6644';
           setTimeout(()=>{ walletEl.style.animation='flashPop 0.4s ease-out'; walletEl.style.color='#FFD700'; },50);
@@ -3783,7 +3924,7 @@ function connectMultiplayer(password=''){
     socket.on('coins:received',(data)=>{
       window.myChips=(window.myChips||0)+data.amount;
       const walletEl=document.getElementById('walletAmount');
-      if(walletEl){ walletEl.textContent=window.myChips.toLocaleString(); walletEl.style.color='#88FF44'; setTimeout(()=>walletEl.style.color='#FFD700',1500); }
+      if(walletEl){ walletEl.textContent=fmtSB(window.myChips); walletEl.style.color='#88FF44'; setTimeout(()=>walletEl.style.color='#FFD700',1500); }
       const ann=document.createElement('div');
       ann.style.cssText=`position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
         background:rgba(20,20,0,0.97);border:2px solid #FFD700;border-radius:16px;
@@ -3885,12 +4026,13 @@ function connectMultiplayer(password=''){
   }
 }
 
+function fmtSB(n){ if(typeof n!=="number"||isNaN(n)) return "0"; if(!isFinite(n)||n>=1e305) return "♾"; if(n>=1e15){ var e=Math.floor(Math.log10(n)); return (n/Math.pow(10,e)).toFixed(2)+"e"+e; } if(n>=1e12) return (n/1e12).toFixed(1)+"T"; if(n>=1e9) return (n/1e9).toFixed(1)+"B"; if(n>=1e6) return (n/1e6).toFixed(1)+"M"; if(n>=1e3) return (n/1e3).toFixed(1)+"K"; return String(Math.floor(n)); }
 // Notification toast
 function showNotification(msg){
   const el=document.createElement('div');
   el.style.cssText=`position:fixed;top:60px;left:50%;transform:translateX(-50%);
     background:rgba(0,0,0,0.75);color:white;font-family:sans-serif;font-size:14px;
-    padding:10px 20px;border-radius:10px;z-index:500;pointer-events:none;
+    padding:10px 20px;border-radius:10px;z-index:850;pointer-events:none;
     border:1px solid rgba(255,255,255,0.15);`;
   el.textContent=msg;
   document.body.appendChild(el);
@@ -3898,7 +4040,6 @@ function showNotification(msg){
   setTimeout(()=>el.remove(),3000);
 }
 
-// ── POKER TABLE ──────────────────────────────────────────
 // Physical table in the cafeteria
 const pokerTableGroup = new THREE.Group();
 // Table top (green felt)
@@ -4065,7 +4206,6 @@ function showHandResult(results){
 // T key hint
 
 
-// ─── SOCIAL SYSTEM ───────────────────────────────────────
 
 // ── FRIENDS + DM ──
 let friends = []; // loaded per-user after login
@@ -4126,7 +4266,7 @@ function renderSocialPanel(){
       <span style="font-size:1.5rem;">💰</span>
       <div>
         <div style="font-size:0.75rem;opacity:0.55;">SpaceBucks</div>
-        <div id="walletAmount" style="font-size:1.3rem;font-weight:bold;color:#FFD700;">${(window.myChips||0).toLocaleString()}</div>
+        <div id="walletAmount" style="font-size:1.3rem;font-weight:bold;color:#FFD700;">${fmtSB(window.myChips||0)}</div>
       </div>
     </div>
     ${friendsOnline.length===0&&friendsOffline.length===0
@@ -4286,6 +4426,10 @@ function showPlayerMenu(socketId, screenX, screenY){
     <div class="pmItem" onclick="window.pmGolf('${socketId}')"
       style="padding:9px 14px;cursor:pointer;border-radius:8px;font-size:0.88rem;display:flex;align-items:center;gap:8px;color:#44FF88;">
       ⛳ Challenge to Golf!
+    </div>
+    <div class="pmItem" onclick="window.requestDuel('${socketId}');window.closePlayerMenu()"
+      style="padding:9px 14px;cursor:pointer;border-radius:8px;font-size:0.88rem;display:flex;align-items:center;gap:8px;color:#FF4400;">
+      ⚔️ RoboDuel Challenge!
     </div>
     <div class="pmItem" onclick="window.pmSendCoins('${socketId}')"
       style="padding:9px 14px;cursor:pointer;border-radius:8px;font-size:0.88rem;display:flex;align-items:center;gap:8px;color:#FFD700;">
@@ -4618,7 +4762,6 @@ if(!window.matchMedia('(pointer:coarse)').matches){
   },500);
 }
 
-// ─── MULTIPLAYER GOLF ─────────────────────────────────────
 let mpGolf = {
   active: false,
   matchData: null,
@@ -4940,7 +5083,6 @@ const _golfSocketPoll=setInterval(()=>{
 
 const CSHOP_X=50, CSHOP_Z=-22;
 const SHOP_X=12, SHOP_Z=-41;
-// ─── COSMETIC SHOP ────────────────────────────────────────
 
 // Shop building
 box(10,5,8, 0xDDCCFF, CSHOP_X,2.5,CSHOP_Z, false);
@@ -4967,8 +5109,6 @@ scene.add(mannequin);
 addCollider(CSHOP_X,CSHOP_Z,10,8);
 addRoof(CSHOP_X,CSHOP_Z,10,8,5.3);
 
-// Connecting path between shops
-box(10,0.1,3, 0xCCBBAA, (SHOP_X+CSHOP_X)/2,0.06,SHOP_Z, false);
 
 let nearCosmeticShop=false;
 
@@ -5038,7 +5178,7 @@ function renderCosmeticShopUI(){
         <div style="font-size:2rem;">✨</div>
         <h2 style="margin:4px 0;color:#CC99FF;">Astropelion Boutique</h2>
         <div style="opacity:0.5;font-size:0.8rem;">Madame Zara, Style Oracle</div>
-        <div style="margin-top:8px;color:#FFD700;">Balance: ${chips.toLocaleString()} SB</div>
+        <div style="margin-top:8px;color:#FFD700;">Balance: ${fmtSB(chips)} SB</div>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
@@ -5104,13 +5244,13 @@ function setupCosmeticSocketEvents(){
   socket.on('cosmetic:state',(data)=>{
     myCosmetics=data.owned||[];
     applyCosmetics(data.equipped||{});
-    if(data.chips!==undefined){ window.myChips=data.chips; const el=document.getElementById('walletAmount'); if(el) el.textContent=data.chips.toLocaleString(); }
+    if(data.chips!==undefined){ window.myChips=data.chips; const el=document.getElementById('walletAmount'); if(el) el.textContent=fmtSB(data.chips); }
     if(document.getElementById('cosmeticShopOverlay')) renderCosmeticShopUI();
   });
   socket.on('cosmetic:bought',(data)=>{
     myCosmetics=data.owned;
     window.myChips=data.chips;
-    const el=document.getElementById('walletAmount'); if(el) el.textContent=data.chips.toLocaleString();
+    const el=document.getElementById('walletAmount'); if(el) el.textContent=fmtSB(data.chips);
     showNotification('✨ '+data.name+' unlocked!');
     if(document.getElementById('cosmeticShopOverlay')) renderCosmeticShopUI();
   });
@@ -5119,7 +5259,6 @@ const _cosmeticPoll=setInterval(()=>{
   if(socket&&mySocketId){ setupCosmeticSocketEvents(); socket.emit('cosmetic:getState'); clearInterval(_cosmeticPoll); }
 },900);
 
-// ─── PET SHOP ─────────────────────────────────────────────
 // Small shop east of campus near z=-10, x=28
 
 // Shop building
@@ -5162,7 +5301,6 @@ addRoof(SHOP_X, SHOP_Z, 10, 8, 5.3);
 
 let nearPetShop=false;
 
-// ─── PET SYSTEM ───────────────────────────────────────────
 const PET_TYPES={
   turtle: {rarity:'common',  color:0x336622, size:0.35, sayings:['*slow blink*','...','home is where u are','🐢']},
   gopher: {rarity:'common',  color:0xAA7744, size:0.28, sayings:['squeak!','digging time','hi hi hi!','*sniffs*']},
@@ -5283,6 +5421,7 @@ function updatePet(delta,totalTime){
   activePetGroup.position.y+=Math.sin(totalTime*2.5)*0.04;
 
   // Random sayings
+  if(window._playerZone==='space') return;
   petSayTimer-=delta;
   if(petSayTimer<0){
     petSayTimer=15+Math.random()*25;
@@ -5327,7 +5466,7 @@ function renderPetShopUI(){
         <div style="font-size:2rem;">🐾</div>
         <h2 style="margin:4px 0;color:#FFCC66;">Astropelion Pet Shop</h2>
         <div style="opacity:0.5;font-size:0.8rem;">Dr. Patches, Veterinarian & Egg Dealer</div>
-        <div style="margin-top:8px;color:#FFD700;">Balance: ${chips.toLocaleString()} SB</div>
+        <div style="margin-top:8px;color:#FFD700;">Balance: ${fmtSB(chips)} SB</div>
       </div>
 
       ${pet&&pet.alive?`
@@ -5404,7 +5543,7 @@ function setupPetSocketEvents(){
     if(data.chips!==undefined){
       window.myChips=data.chips;
       const el=document.getElementById('walletAmount');
-      if(el) el.textContent=data.chips.toLocaleString();
+      if(el) el.textContent=fmtSB(data.chips);
     }
   });
 
@@ -5472,7 +5611,6 @@ const _petPoll=setInterval(()=>{
   }
 },800);
 
-// ─── LOUNGE HOLD'EM POKER ─────────────────────────────────
 
 // Daily chip bonus
 function claimDailyChips(){
@@ -5725,7 +5863,7 @@ function setupLoungePokerSocketEvents(){
     const diff=d.chips-prev;
     if(diff!==0){
       const el=document.getElementById('walletAmount');
-      if(el){ el.textContent=d.chips.toLocaleString(); el.style.color=diff>0?'#88FF44':'#FF6644'; setTimeout(()=>el.style.color='#FFD700',1200); }
+      if(el){ el.textContent=d.fmtSB(chips); el.style.color=diff>0?'#88FF44':'#FF6644'; setTimeout(()=>el.style.color='#FFD700',1200); }
       if(Math.abs(diff)>0) showNotification(diff>0?'+ '+diff+' SpaceBucks!':'-'+Math.abs(diff)+' SpaceBucks lost');
     }
     if(loungePokerOverlay.style.display==='flex') renderLoungePoker();
@@ -5739,6 +5877,62 @@ const _lpPoll=setInterval(()=>{
 
 // Slot positions for proximity (mirrors world positions)
 // SLOT_POSITIONS already declared in lounge build section
+
+function openGoldenTicketVendor(){
+  if(document.getElementById('goldenTicketOverlay')) return;
+  inRoom=true;
+  if(document.pointerLockElement) document.exitPointerLock();
+  const chips=window.myChips||0;
+  const canAfford=chips>=GTV_PRICE;
+  const overlay=document.createElement('div');
+  overlay.id='goldenTicketOverlay';
+  overlay.style.cssText=`position:fixed;inset:0;background:rgba(0,0,0,0.93);color:white;
+    font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;z-index:300;`;
+  overlay.innerHTML=`
+    <div style="max-width:400px;width:90%;padding:32px 28px;box-sizing:border-box;
+      background:rgba(12,8,0,0.98);border:2px solid #FFD700;border-radius:20px;text-align:center;
+      box-shadow:0 0 50px rgba(255,200,0,0.15);">
+      <div style="font-size:3rem;margin-bottom:8px;">🎟️</div>
+      <div style="font-size:1.5rem;font-weight:bold;color:#FFD700;margin-bottom:4px;">Golden Ticket</div>
+      <div style="opacity:0.45;font-size:0.75rem;margin-bottom:22px;">Cosmo's Space Adventures Inc.</div>
+      <div style="background:rgba(255,200,0,0.06);border:1px solid rgba(255,200,0,0.18);border-radius:12px;
+        padding:16px;margin-bottom:20px;font-size:0.84rem;line-height:1.75;opacity:0.9;">
+        One-way ticket to the stars.<br>
+        Complete the mission. Unlock Station Alpha.<br>
+        <span style="color:#FFD700;font-weight:bold;">Non-refundable. Adventure guaranteed.</span>
+      </div>
+      <div style="font-size:1.05rem;color:#FFD700;font-weight:bold;margin-bottom:6px;">
+        300,000,000,000,000 SB
+      </div>
+      <div style="font-size:0.72rem;opacity:0.4;margin-bottom:22px;">
+        Your balance: ${chips.toLocaleString()} SB
+      </div>
+      ${canAfford
+        ? `<button onclick="window.buyGoldenTicket()" style="width:100%;padding:14px;
+            background:linear-gradient(135deg,#AA8800,#CC9900);color:white;border:none;
+            border-radius:12px;font-size:15px;font-weight:bold;cursor:pointer;margin-bottom:10px;
+            letter-spacing:0.06em;-webkit-tap-highlight-color:transparent;">🚀 PURCHASE &amp; LAUNCH</button>`
+        : `<div style="padding:12px;background:rgba(255,0,0,0.09);border:1px solid rgba(255,50,50,0.25);
+            border-radius:10px;font-size:0.82rem;opacity:0.7;margin-bottom:10px;color:#FF8888;">
+            Insufficient SpaceBucks.</div>`
+      }
+      <button onclick="window.closeGoldenTicketVendor()" style="width:100%;padding:10px;
+        background:rgba(255,255,255,0.05);color:white;border:1px solid rgba(255,255,255,0.1);
+        border-radius:10px;font-size:13px;cursor:pointer;-webkit-tap-highlight-color:transparent;">Close</button>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+window.buyGoldenTicket=()=>{
+  if(!socket||!mySocketId){ showNotification('Connect first!'); return; }
+  if((window.myChips||0)<GTV_PRICE){ showNotification('Not enough SpaceBucks!'); return; }
+  socket.emit('space:buyGoldenTicket');
+};
+window.closeGoldenTicketVendor=()=>{
+  const ov=document.getElementById('goldenTicketOverlay');
+  if(ov) ov.remove();
+  inRoom=false;
+  relockPointer();
+};
 
 function buyRaffleTicket(){
   if(!socket||!mySocketId){ showNotification('Connect to buy tickets!'); return; }
@@ -5776,7 +5970,6 @@ function openLeaderboard(){
 window.closeLeaderboard=()=>{ leaderboardOverlay.style.display='none'; inRoom=false; relockPointer(); };
 
 // Slot positions already declared above
-// ─── SLOT MACHINE MINI-GAME ───────────────────────────────
 const SLOT_SYMBOLS = ['🍒','🍋','🍊','🔔','💎','7️⃣','⭐'];
 const SLOT_WEIGHTS = [40,30,20,15,8,4,2]; // higher = more common (cherries most frequent)
 const SLOT_PAYOUTS = { // multipliers on bet
@@ -5870,7 +6063,7 @@ function renderSlotMachine(){
 
       <!-- Balance -->
       <div style="opacity:0.6;font-size:0.85rem;margin-bottom:14px;">
-        Balance: <strong id="slotBalance">${myChips.toLocaleString()}</strong> SpaceBucks
+        Balance: <strong id="slotBalance">${fmtSB(myChips)}</strong> SpaceBucks
       </div>
 
       <!-- House jackpot info -->
@@ -5992,7 +6185,7 @@ function setupSlotSocketEvents(){
         return '<tr style="background:'+( isMe?'rgba(255,215,0,0.12)':'rgba(255,255,255,0.03)')+';border-bottom:1px solid rgba(255,255,255,0.05);">'+
           '<td style="padding:7px 8px;opacity:0.5;">'+(i+1)+'</td>'+
           '<td style="padding:7px 8px;font-weight:'+( isMe?'bold':'normal')+';color:'+( isMe?'#FFD700':'white')+';">'+ medal+' '+p.username+'</td>'+
-          '<td style="padding:7px 8px;text-align:right;color:#FFD700;">'+p.chips.toLocaleString()+'</td>'+
+          '<td style="padding:7px 8px;text-align:right;color:#FFD700;">'+p.fmtSB(chips)+'</td>'+
         '</tr>';
       }).join('')+
     '</table>';
@@ -6035,7 +6228,6 @@ function animate(){requestAnimationFrame(animate);update();renderer.render(scene
 animate();
 
 // ══════════════════════════════════════════════════════════════
-// ─── CAR SYSTEM (append to END of main.js) ────────────────────
 // ══════════════════════════════════════════════════════════════
 
 // ── CONSTANTS ──
@@ -6625,7 +6817,7 @@ function setupCarSocketEvents(){
     const credit = document.createElement('div');
     credit.style.cssText = `position:fixed;bottom:140px;left:50%;transform:translateX(-50%);
       background:rgba(0,0,0,0.72);color:rgba(255,255,255,0.65);font-family:sans-serif;
-      font-size:12px;padding:6px 16px;border-radius:8px;z-index:500;pointer-events:none;
+      font-size:12px;padding:6px 16px;border-radius:8px;z-index:850;pointer-events:none;
       border:1px solid rgba(255,255,255,0.15);transition:opacity 1s;`;
     credit.textContent = '🏎️ Porsche GT3 RS · Model by Black Snow (CC BY)';
     document.body.appendChild(credit);
@@ -6706,3 +6898,31 @@ const _carSocketPoll = setInterval(() => {
     _carLastMs = now;
   })();
 }
+// === MODULE BRIDGE ===
+window._mineScene            = scene;
+window._mineCamera           = camera;
+window._mineGetSocket        = () => socket;
+window._mineGetUsername      = () => myUsername;
+window._mineGetSocketId      = () => mySocketId;
+window._mineShowNotification = showNotification;
+window.colliders = colliders;
+window._stationUpdate?.(delta, totalTime);
+window._mineIsBlocked = () =>
+  inRoom || golfMode || slideMode || carDriving || chatOpen ||
+  isSitting || wishOverlay.style.display === 'flex' ||
+  pokerOverlay.style.display === 'flex' ||
+  loungePokerOverlay.style.display === 'flex';
+
+import('./mining-client.js');
+import('./workshop-client.js');
+import('./robots-client.js');
+import('./vendor-client.js');
+import('./battle-client.js');
+import('./market-client.js');
+import('./space-client.js');
+import('./station-client.js');
+import('./sanctum-client.js');
+import('./dds-client.js');
+import('./planet-client.js');
+import('./ship-client.js');
+import('./deepspace-client.js');
